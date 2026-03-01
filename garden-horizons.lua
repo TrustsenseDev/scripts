@@ -20,11 +20,22 @@ Hub.Config.AutoBuyGears = Hub.Config.AutoBuyGears or {
     Enabled = false,
     SelectedGearNames = {}
 }
+Hub.Config.AutoBotanist = Hub.Config.AutoBotanist or {
+    Enabled = false,
+    AutoRequestQuest = true,
+    AutoDonateAll = true,
+    AutoAppraiseHeld = false,
+    TeleportToBotanist = true
+}
 Hub.Config.AutoSprinkler = Hub.Config.AutoSprinkler or {
     Enabled = false
 }
 Hub.Config.AutoSell = Hub.Config.AutoSell or {
     Enabled = false
+}
+Hub.Config.FPSBoost = Hub.Config.FPSBoost or {
+    Enabled = false,
+    TargetFPS = 360
 }
 Hub.Config.AutoHarvest = Hub.Config.AutoHarvest or {
     Enabled = false,
@@ -42,8 +53,11 @@ Hub.Config.AntiAFK = Hub.Config.AntiAFK or {
 Hub.Config.AutoPlant.Enabled = Hub.Config.AutoPlant.Enabled == true
 Hub.Config.AutoBuySeeds.Enabled = Hub.Config.AutoBuySeeds.Enabled == true
 Hub.Config.AutoBuyGears.Enabled = Hub.Config.AutoBuyGears.Enabled == true
+Hub.Config.AutoBotanist.Enabled = Hub.Config.AutoBotanist.Enabled == true
 Hub.Config.AutoSprinkler.Enabled = Hub.Config.AutoSprinkler.Enabled == true
 Hub.Config.AutoSell.Enabled = Hub.Config.AutoSell.Enabled == true
+Hub.Config.FPSBoost.Enabled = Hub.Config.FPSBoost.Enabled == true
+Hub.Config.FPSBoost.TargetFPS = math.max(60, math.min(500, math.floor(tonumber(Hub.Config.FPSBoost.TargetFPS) or 360)))
 Hub.Config.AutoHarvest.Enabled = Hub.Config.AutoHarvest.Enabled == true
 if Hub.Config.AntiAFK.Enabled == nil then
     Hub.Config.AntiAFK.Enabled = true
@@ -57,6 +71,22 @@ end
 Hub.Config.AntiAFK.Enabled = Hub.Config.AntiAFK.Enabled == true
 Hub.Config.AntiAFK.DisableGameConnections = Hub.Config.AntiAFK.DisableGameConnections == true
 Hub.Config.AntiAFK.UseClassic = Hub.Config.AntiAFK.UseClassic == true
+if Hub.Config.AutoBotanist.AutoRequestQuest == nil then
+    Hub.Config.AutoBotanist.AutoRequestQuest = true
+end
+if Hub.Config.AutoBotanist.AutoDonateAll == nil then
+    Hub.Config.AutoBotanist.AutoDonateAll = true
+end
+if Hub.Config.AutoBotanist.AutoAppraiseHeld == nil then
+    Hub.Config.AutoBotanist.AutoAppraiseHeld = false
+end
+if Hub.Config.AutoBotanist.TeleportToBotanist == nil then
+    Hub.Config.AutoBotanist.TeleportToBotanist = true
+end
+Hub.Config.AutoBotanist.AutoRequestQuest = Hub.Config.AutoBotanist.AutoRequestQuest == true
+Hub.Config.AutoBotanist.AutoDonateAll = Hub.Config.AutoBotanist.AutoDonateAll == true
+Hub.Config.AutoBotanist.AutoAppraiseHeld = Hub.Config.AutoBotanist.AutoAppraiseHeld == true
+Hub.Config.AutoBotanist.TeleportToBotanist = Hub.Config.AutoBotanist.TeleportToBotanist == true
 if Hub.Config.AutoHarvest.AllowRipe == nil then
     Hub.Config.AutoHarvest.AllowRipe = true
 end
@@ -91,6 +121,7 @@ local SeedShopData = require(ReplicatedStorage:WaitForChild("Shop"):WaitForChild
 local GearShopData = require(ReplicatedStorage:WaitForChild("Shop"):WaitForChild("ShopData"):WaitForChild("GearShopData"))
 local SprinklerDefinitions = require(ReplicatedStorage:WaitForChild("Gears"):WaitForChild("Definitions"):WaitForChild("SprinklerDefinitions"))
 local PlantDataDefinitions = require(ReplicatedStorage:WaitForChild("Plants"):WaitForChild("Definitions"):WaitForChild("PlantDataDefinitions"))
+local BotanistDefinitions = require(ReplicatedStorage:WaitForChild("Plants"):WaitForChild("Definitions"):WaitForChild("BotanistDefinitions"))
 
 local DISCORD_INVITE_URL = "https://discord.gg/6KVvbEYaXF"
 local DISCORD_INVITE_CODE = "6KVvbEYaXF"
@@ -114,6 +145,9 @@ local AUTO_BUY_LOOP_DELAY = 1.0
 local AUTO_BUY_PURCHASE_DELAY = 0.06
 local AUTO_BUY_MAX_PURCHASES_PER_TICK = 60
 local AUTO_SELL_LOOP_DELAY = 0.75
+local STOCK_TIMER_UPDATE_INTERVAL = 1.0
+local STOCK_TIMER_WARN_SECONDS = 45
+local STOCK_TIMER_STALE_SECONDS = 120
 local AUTO_HARVEST_LOOP_DELAY = 0.3
 local AUTO_HARVEST_MAX_PER_TICK = 80
 local AUTO_HARVEST_RETRY_GUARD_SECONDS = 1.4
@@ -126,6 +160,7 @@ local AUTO_SPRINKLER_MIN_NEW_COVERAGE = 1
 local SPRINKLER_PLACE_COOLDOWN = 1.05
 local SPRINKLER_PLACE_CONFIRM_TIMEOUT = 3.2
 local SPRINKLER_DIRECT_CONFIRM_TIMEOUT = 1.15
+local SPRINKLER_DIRECT_ATTEMPTS_PER_POSITION = 2
 local SPRINKLER_CANDIDATE_DEDUPE_STEP = 0.75
 local SPRINKLER_PLANT_CLEARANCE = 1.35
 local SPRINKLER_CONFIRM_NEAR_DISTANCE = 4.5
@@ -134,6 +169,8 @@ local SPRINKLER_MOUSE_CLICK_DELAY = 0.05
 local SPRINKLER_POSITION_JITTER_STEP = 1.0
 local SPRINKLER_REQUIRED_PLAYER_DISTANCE = 6.5
 local SPRINKLER_DESIRED_STAND_DISTANCE = 4.2
+local SPRINKLER_COVERAGE_TARGET_DEDUPE_STEP = 1.6
+local SPRINKLER_COVERAGE_TARGET_MAX = 360
 local ANTI_AFK_PULSE_INTERVAL = 20
 local TELEPORT_HEIGHT_OFFSET = 3.5
 local TELEPORT_NEAR_DISTANCE = 20
@@ -234,6 +271,17 @@ local function flushQueuedUILabelUpdates()
         end
     end
 
+    local autoBotanistText = queue.AutoBotanist
+    if autoBotanistText ~= nil then
+        queue.AutoBotanist = nil
+        local label = ui.AutoBotanistStatusLabel
+        if label and type(label.SetText) == "function" then
+            pcall(function()
+                label:SetText(autoBotanistText)
+            end)
+        end
+    end
+
     local autoSprinklerText = queue.AutoSprinkler
     if autoSprinklerText ~= nil then
         queue.AutoSprinkler = nil
@@ -274,6 +322,17 @@ local function flushQueuedUILabelUpdates()
         if label and type(label.SetText) == "function" then
             pcall(function()
                 label:SetText(antiAFKText)
+            end)
+        end
+    end
+
+    local fpsBoostText = queue.FPSBoost
+    if fpsBoostText ~= nil then
+        queue.FPSBoost = nil
+        local label = ui.FPSBoostStatusLabel
+        if label and type(label.SetText) == "function" then
+            pcall(function()
+                label:SetText(fpsBoostText)
             end)
         end
     end
@@ -1428,12 +1487,190 @@ local function buildAvailableStockText(title, itemDefinitions, stockSnapshot, fe
     )
 end
 
+local StockStatusState = {
+    Seed = {
+        Snapshot = nil,
+        FetchError = nil,
+        HasFetched = false,
+        RestockInterval = tonumber(SeedShopData.RestockInterval) or 300,
+        LastCycleIndex = nil,
+        LastChangedAt = nil,
+        Signature = nil
+    },
+    Gear = {
+        Snapshot = nil,
+        FetchError = nil,
+        HasFetched = false,
+        RestockInterval = tonumber(GearShopData.RestockInterval) or 300,
+        LastCycleIndex = nil,
+        LastChangedAt = nil,
+        Signature = nil
+    }
+}
+
+local function formatElapsedStockTime(totalSeconds)
+    local seconds = math.max(0, math.floor(tonumber(totalSeconds) or 0))
+    local minutes = math.floor(seconds / 60)
+    local remainingSeconds = seconds % 60
+    return string.format("%02d:%02d", minutes, remainingSeconds)
+end
+
+local function getStockTimerColor(remainingSeconds)
+    if remainingSeconds <= STOCK_TIMER_WARN_SECONDS then
+        return "#EF4444"
+    end
+    if remainingSeconds <= STOCK_TIMER_STALE_SECONDS then
+        return "#F59E0B"
+    end
+    return "#22C55E"
+end
+
+local function getServerClockSeconds()
+    local ok, serverNow = pcall(function()
+        return workspace:GetServerTimeNow()
+    end)
+    if ok and type(serverNow) == "number" then
+        return serverNow
+    end
+    return tick()
+end
+
+local function buildStockSignature(itemDefinitions, stockSnapshot)
+    local items = stockSnapshot and stockSnapshot.Items
+    if type(items) ~= "table" then
+        return nil
+    end
+
+    local signatureParts = {}
+    for _, itemDef in ipairs(itemDefinitions) do
+        local itemName = tostring(itemDef.Name or "")
+        signatureParts[#signatureParts + 1] = itemName .. ":" .. tostring(getShopStockAmount(stockSnapshot, itemName))
+    end
+    return table.concat(signatureParts, "|")
+end
+
+local function buildStockTimerText(stockState)
+    local restockInterval = math.max(1, math.floor(tonumber(stockState.RestockInterval) or 300))
+
+    local serverSeconds = getServerClockSeconds()
+    local secondsUntilRestock = restockInterval - serverSeconds % restockInterval
+    local remainingSeconds = math.min(math.ceil(secondsUntilRestock), restockInterval)
+    if remainingSeconds <= 0 then
+        remainingSeconds = restockInterval
+    end
+    local timerColor = getStockTimerColor(remainingSeconds)
+    return string.format(
+        "<font color='%s'>Update Timer: %s</font>",
+        timerColor,
+        formatElapsedStockTime(remainingSeconds)
+    )
+end
+
+local function renderStockStatus(labelKey, title, itemDefinitions, stockState)
+    local stockText
+    if stockState.HasFetched then
+        stockText = buildAvailableStockText(title, itemDefinitions, stockState.Snapshot, stockState.FetchError)
+    else
+        stockText = title .. ": Loading..."
+    end
+    local timerText = buildStockTimerText(stockState)
+    queueUILabelUpdate(labelKey, stockText .. "\n" .. timerText)
+end
+
+local function getStockCycleIndex(stockState, serverSeconds)
+    local restockInterval = math.max(1, math.floor(tonumber(stockState.RestockInterval) or 300))
+    return math.floor(serverSeconds / restockInterval)
+end
+
+local function updateStockState(stockState, itemDefinitions, stockSnapshot, fetchError)
+    stockState.HasFetched = true
+    stockState.Snapshot = stockSnapshot
+    stockState.FetchError = fetchError
+
+    if stockSnapshot then
+        local serverSeconds = getServerClockSeconds()
+        stockState.LastCycleIndex = getStockCycleIndex(stockState, serverSeconds)
+        local now = tick()
+        local signature = buildStockSignature(itemDefinitions, stockSnapshot)
+        if signature ~= stockState.Signature then
+            stockState.Signature = signature
+            stockState.LastChangedAt = now
+        elseif type(stockState.LastChangedAt) ~= "number" then
+            stockState.LastChangedAt = now
+        end
+    end
+end
+
 local function updateSeedStockStatus(stockSnapshot, fetchError)
-    queueUILabelUpdate("SeedStock", buildAvailableStockText("Seed Stock", SeedShopItemDefinitions, stockSnapshot, fetchError))
+    updateStockState(StockStatusState.Seed, SeedShopItemDefinitions, stockSnapshot, fetchError)
+    renderStockStatus("SeedStock", "Seed Stock", SeedShopItemDefinitions, StockStatusState.Seed)
 end
 
 local function updateGearStockStatus(stockSnapshot, fetchError)
-    queueUILabelUpdate("GearStock", buildAvailableStockText("Gear Stock", GearShopItemDefinitions, stockSnapshot, fetchError))
+    updateStockState(StockStatusState.Gear, GearShopItemDefinitions, stockSnapshot, fetchError)
+    renderStockStatus("GearStock", "Gear Stock", GearShopItemDefinitions, StockStatusState.Gear)
+end
+
+local function refreshSeedStockStatus()
+    task.spawn(function()
+        if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+        local stockSnapshot, fetchError = fetchSeedShopDataSnapshot()
+        if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+        updateSeedStockStatus(stockSnapshot, fetchError)
+    end)
+end
+
+local function refreshGearStockStatus()
+    task.spawn(function()
+        if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+        local stockSnapshot, fetchError = fetchGearShopDataSnapshot()
+        if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+        updateGearStockStatus(stockSnapshot, fetchError)
+    end)
+end
+
+local function refreshStockOnNewServerCycle(serverSeconds)
+    local function refreshIfCycleAdvanced(stockState, refreshFn)
+        local cycleIndex = getStockCycleIndex(stockState, serverSeconds)
+        if type(stockState.LastCycleIndex) ~= "number" then
+            stockState.LastCycleIndex = cycleIndex
+            return
+        end
+        if cycleIndex ~= stockState.LastCycleIndex then
+            stockState.LastCycleIndex = cycleIndex
+            refreshFn()
+        end
+    end
+
+    refreshIfCycleAdvanced(StockStatusState.Seed, refreshSeedStockStatus)
+    refreshIfCycleAdvanced(StockStatusState.Gear, refreshGearStockStatus)
+end
+
+local function ensureStockTimerLoop()
+    if Hub.StockTimerLoopRunning then
+        return
+    end
+
+    Hub.StockTimerLoopRunning = true
+    local runId = CurrentRunId
+    task.spawn(function()
+        while not Hub.IsUnloaded and Hub.RunId == runId do
+            local serverSeconds = getServerClockSeconds()
+            refreshStockOnNewServerCycle(serverSeconds)
+            renderStockStatus("SeedStock", "Seed Stock", SeedShopItemDefinitions, StockStatusState.Seed)
+            renderStockStatus("GearStock", "Gear Stock", GearShopItemDefinitions, StockStatusState.Gear)
+            task.wait(STOCK_TIMER_UPDATE_INTERVAL)
+        end
+        Hub.StockTimerLoopRunning = false
+    end)
 end
 
 local function shouldStopAutoBuyForReason(reasonText)
@@ -1640,7 +1877,12 @@ local function buildHarvestPayloadFromTarget(targetModel)
     }, key
 end
 
-local function collectOwnedHarvestCandidates()
+local function collectOwnedHarvestCandidates(options)
+    local opts = type(options) == "table" and options or nil
+    local customFilter = opts and opts.CustomFilter
+    local ignorePlantTypeFilter = opts and opts.IgnorePlantTypeFilter == true
+    local ignoreStageFilter = opts and opts.IgnoreStageFilter == true
+
     local candidates = {}
     local seenKeys = {}
     local root = getRootPart()
@@ -1656,10 +1898,31 @@ local function collectOwnedHarvestCandidates()
                 and not ownerContainer:GetAttribute("IsHarvested")
             then
                 local plantType = resolvePlantType(targetModel, ownerContainer)
-                if shouldHarvestPlantType(plantType) then
+                local passTypeFilter = ignorePlantTypeFilter or shouldHarvestPlantType(plantType)
+                if passTypeFilter then
                     local ripenessStage = targetModel:GetAttribute("RipenessStage")
                         or ownerContainer:GetAttribute("RipenessStage")
-                    if shouldHarvestRipenessStage(ripenessStage) then
+                    local passStageFilter = ignoreStageFilter or shouldHarvestRipenessStage(ripenessStage)
+                    if passStageFilter then
+                        local mutation = targetModel:GetAttribute("Mutation")
+                        if (type(mutation) ~= "string" or mutation == "") and ownerContainer ~= targetModel then
+                            mutation = ownerContainer:GetAttribute("Mutation")
+                        end
+
+                        if type(customFilter) == "function" then
+                            local okFilter, allowed = pcall(
+                                customFilter,
+                                targetModel,
+                                ownerContainer,
+                                plantType,
+                                ripenessStage,
+                                mutation
+                            )
+                            if not okFilter or not allowed then
+                                continue
+                            end
+                        end
+
                         local payload, key = buildHarvestPayloadFromTarget(targetModel)
                         if payload and key and not seenKeys[key] then
                             seenKeys[key] = true
@@ -1673,6 +1936,7 @@ local function collectOwnedHarvestCandidates()
                                 Key = key,
                                 PlantType = plantType or "Unknown",
                                 RipenessStage = normalizeRipenessStage(ripenessStage) or "Unknown",
+                                Mutation = type(mutation) == "string" and mutation or "",
                                 Position = worldPos,
                                 Distance = distance,
                                 TargetModel = targetModel
@@ -1916,6 +2180,191 @@ local function dedupeWorldPositionsXZ(positions, step)
     return deduped
 end
 
+local function buildSprinklerFriendlyPlantOrder(parts)
+    local positions = dedupeWorldPositionsXZ(buildGridPoints(parts), 0.45)
+    if #positions <= 1 then
+        return positions
+    end
+
+    local anchors = {}
+    local activeSprinklers = getOwnedActiveSprinklers(parts)
+    for _, sprinkler in ipairs(activeSprinklers) do
+        local sprinklerPosition = sprinkler and sprinkler.Position
+        if typeof(sprinklerPosition) == "Vector3" then
+            anchors[#anchors + 1] = sprinklerPosition
+        end
+    end
+
+    local partCenters = {}
+    for _, part in ipairs(parts) do
+        if part:IsA("BasePart") then
+            partCenters[#partCenters + 1] = (part.CFrame * CFrame.new(0, part.Size.Y * 0.5, 0)).Position
+        end
+    end
+
+    -- Without active sprinklers, center-first planting gives compact blocks
+    -- that are easier for future sprinkler coverage than extending edge lines.
+    if #anchors == 0 then
+        for _, center in ipairs(partCenters) do
+            anchors[#anchors + 1] = center
+        end
+    end
+    if #anchors == 0 then
+        return positions
+    end
+
+    local neighborRadiusSq = (GRID_STEP * 1.35) ^ 2
+    local entries = {}
+    for index, position in ipairs(positions) do
+        local nearestAnchorSq = math.huge
+        for _, anchorPosition in ipairs(anchors) do
+            local dx = position.X - anchorPosition.X
+            local dz = position.Z - anchorPosition.Z
+            local distanceSq = dx * dx + dz * dz
+            if distanceSq < nearestAnchorSq then
+                nearestAnchorSq = distanceSq
+            end
+        end
+
+        local nearestCenterSq = math.huge
+        for _, centerPosition in ipairs(partCenters) do
+            local dx = position.X - centerPosition.X
+            local dz = position.Z - centerPosition.Z
+            local distanceSq = dx * dx + dz * dz
+            if distanceSq < nearestCenterSq then
+                nearestCenterSq = distanceSq
+            end
+        end
+
+        local neighborCount = 0
+        for otherIndex, otherPosition in ipairs(positions) do
+            if otherIndex ~= index then
+                local dx = position.X - otherPosition.X
+                local dz = position.Z - otherPosition.Z
+                local distanceSq = dx * dx + dz * dz
+                if distanceSq <= neighborRadiusSq then
+                    neighborCount = neighborCount + 1
+                end
+            end
+        end
+
+        entries[#entries + 1] = {
+            Position = position,
+            AnchorDistSq = nearestAnchorSq,
+            CenterDistSq = nearestCenterSq,
+            NeighborCount = neighborCount
+        }
+    end
+
+    table.sort(entries, function(a, b)
+        if a.AnchorDistSq ~= b.AnchorDistSq then
+            return a.AnchorDistSq < b.AnchorDistSq
+        end
+        if a.NeighborCount ~= b.NeighborCount then
+            return a.NeighborCount > b.NeighborCount
+        end
+        if a.CenterDistSq ~= b.CenterDistSq then
+            return a.CenterDistSq < b.CenterDistSq
+        end
+        if math.abs(a.Position.Z - b.Position.Z) > 0.05 then
+            return a.Position.Z < b.Position.Z
+        end
+        return a.Position.X < b.Position.X
+    end)
+
+    local orderedPositions = {}
+    for _, entry in ipairs(entries) do
+        orderedPositions[#orderedPositions + 1] = entry.Position
+    end
+    return orderedPositions
+end
+
+local function worldPositionKeyXZ(position, step)
+    if typeof(position) ~= "Vector3" then
+        return nil
+    end
+    local quantizeStep = math.max(0.1, tonumber(step) or 0.75)
+    local keyX = math.floor(position.X / quantizeStep + 0.5)
+    local keyZ = math.floor(position.Z / quantizeStep + 0.5)
+    return tostring(keyX) .. ":" .. tostring(keyZ)
+end
+
+local function downsampleWorldPositions(positions, maxCount)
+    if type(positions) ~= "table" then
+        return {}
+    end
+    local limit = math.max(1, math.floor(tonumber(maxCount) or 1))
+    if #positions <= limit then
+        return positions
+    end
+
+    local sampled = {}
+    if limit == 1 then
+        sampled[1] = positions[1]
+        return sampled
+    end
+
+    local lastIndex = #positions - 1
+    for sampleIndex = 1, limit do
+        local t = (sampleIndex - 1) / (limit - 1)
+        local sourceIndex = math.floor(t * lastIndex + 0.5) + 1
+        sampled[#sampled + 1] = positions[math.clamp(sourceIndex, 1, #positions)]
+    end
+    return sampled
+end
+
+local function buildSprinklerCoverageTargets(parts, plantTargets)
+    local targets = {}
+    local prioritizedPlantTargets = {}
+    if type(plantTargets) == "table" then
+        for _, position in ipairs(plantTargets) do
+            if typeof(position) == "Vector3" then
+                targets[#targets + 1] = position
+                prioritizedPlantTargets[#prioritizedPlantTargets + 1] = position
+            end
+        end
+    end
+
+    local gridTargets = buildGridPoints(parts)
+    gridTargets = dedupeWorldPositionsXZ(gridTargets, SPRINKLER_COVERAGE_TARGET_DEDUPE_STEP)
+    gridTargets = downsampleWorldPositions(gridTargets, SPRINKLER_COVERAGE_TARGET_MAX)
+
+    for _, position in ipairs(gridTargets) do
+        if typeof(position) == "Vector3" then
+            targets[#targets + 1] = position
+        end
+    end
+
+    targets = dedupeWorldPositionsXZ(targets, SPRINKLER_COVERAGE_TARGET_DEDUPE_STEP)
+    if #targets > SPRINKLER_COVERAGE_TARGET_MAX then
+        local limited = {}
+        local seen = {}
+        for _, position in ipairs(prioritizedPlantTargets) do
+            local key = worldPositionKeyXZ(position, SPRINKLER_COVERAGE_TARGET_DEDUPE_STEP)
+            if key and not seen[key] then
+                seen[key] = true
+                limited[#limited + 1] = position
+                if #limited >= SPRINKLER_COVERAGE_TARGET_MAX then
+                    return limited
+                end
+            end
+        end
+
+        for _, position in ipairs(targets) do
+            local key = worldPositionKeyXZ(position, SPRINKLER_COVERAGE_TARGET_DEDUPE_STEP)
+            if key and not seen[key] then
+                seen[key] = true
+                limited[#limited + 1] = position
+                if #limited >= SPRINKLER_COVERAGE_TARGET_MAX then
+                    break
+                end
+            end
+        end
+        targets = limited
+    end
+    return targets
+end
+
 local function getNearestPlantableSurfacePoint(parts, worldPosition)
     if typeof(worldPosition) ~= "Vector3" then
         return nil
@@ -2030,6 +2479,56 @@ local function isCandidateTooCloseToPlants(candidatePosition, plantTargets, clea
     return false
 end
 
+local function getSprinklerPlantClearance(range)
+    local resolvedRange = math.max(0, tonumber(range) or 0)
+    if resolvedRange <= 0 then
+        return SPRINKLER_PLANT_CLEARANCE
+    end
+    -- Large-range sprinklers can be placed slightly closer to dense crops.
+    return math.clamp(resolvedRange * 0.05, 0.55, SPRINKLER_PLANT_CLEARANCE)
+end
+
+local function computeSprinklerCoverageWithProximity(candidatePosition, range, plantTargets, coveredState)
+    local totalCovered = 0
+    local newCovered = 0
+    local proximityScore = 0
+    local rangeSq = range * range
+    local safeRange = math.max(0.001, tonumber(range) or 0.001)
+
+    for index, plantPosition in ipairs(plantTargets) do
+        local dx = candidatePosition.X - plantPosition.X
+        local dz = candidatePosition.Z - plantPosition.Z
+        local distanceSq = dx * dx + dz * dz
+        if distanceSq <= rangeSq then
+            totalCovered = totalCovered + 1
+            if coveredState[index] ~= true then
+                newCovered = newCovered + 1
+            end
+            local distance = math.sqrt(distanceSq)
+            proximityScore = proximityScore + ((safeRange - distance) / safeRange)
+        end
+    end
+
+    return newCovered, totalCovered, proximityScore
+end
+
+local function computeUncoveredTargetCentroid(plantTargets, coveredState)
+    local sumX = 0
+    local sumZ = 0
+    local count = 0
+    for index, plantPosition in ipairs(plantTargets) do
+        if coveredState[index] ~= true then
+            sumX = sumX + plantPosition.X
+            sumZ = sumZ + plantPosition.Z
+            count = count + 1
+        end
+    end
+    if count <= 0 then
+        return nil
+    end
+    return Vector3.new(sumX / count, 0, sumZ / count)
+end
+
 local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
     local placements = {}
     if not plot or #parts == 0 or #toolEntries == 0 or maxPlacements <= 0 then
@@ -2037,11 +2536,18 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
     end
 
     local plantTargets = collectOwnedPlantTargetsForSprinklers(parts)
-    if #plantTargets == 0 then
+    local coverageTargets
+    if #plantTargets > 0 then
+        coverageTargets = plantTargets
+    else
+        coverageTargets = buildSprinklerCoverageTargets(parts, plantTargets)
+    end
+    if #coverageTargets == 0 then
         return placements, 0, 0
     end
 
-    local candidates = buildSprinklerCandidatePoints(parts, plantTargets)
+    local candidateTargets = #plantTargets > 0 and plantTargets or coverageTargets
+    local candidates = buildSprinklerCandidatePoints(parts, candidateTargets)
     if #candidates == 0 then
         return placements, 0, 0
     end
@@ -2049,7 +2555,7 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
     local existingSprinklers = getOwnedActiveSprinklers(parts)
     local coveredState = {}
     for _, sprinkler in ipairs(existingSprinklers) do
-        markSprinklerCoverage(sprinkler.Position, sprinkler.Range, plantTargets, coveredState)
+        markSprinklerCoverage(sprinkler.Position, sprinkler.Range, coverageTargets, coveredState)
     end
 
     local mutableTools = {}
@@ -2069,30 +2575,52 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
     local totalNewCoverage = 0
     while #placements < maxPlacements do
         local bestChoice = nil
+        local uncoveredCentroid = computeUncoveredTargetCentroid(coverageTargets, coveredState)
 
         for toolIndex, toolEntry in ipairs(mutableTools) do
             if toolEntry.Remaining > 0 and toolEntry.Range > 0 then
+                local plantClearance = getSprinklerPlantClearance(toolEntry.Range)
                 for _, candidatePosition in ipairs(candidates) do
                     if not isTooCloseToPlacedSprinklers(candidatePosition, toolEntry.Range, existingSprinklers)
-                        and not isCandidateTooCloseToPlants(candidatePosition, plantTargets, SPRINKLER_PLANT_CLEARANCE)
+                        and not isCandidateTooCloseToPlants(candidatePosition, plantTargets, plantClearance)
                     then
-                        local newCovered, totalCovered = computeSprinklerCoverage(
+                        local newCovered, totalCovered, proximityScore = computeSprinklerCoverageWithProximity(
                             candidatePosition,
                             toolEntry.Range,
-                            plantTargets,
+                            coverageTargets,
                             coveredState
                         )
                         if newCovered > 0 then
                             local effectWeight = (toolEntry.GrowthMultiplier + toolEntry.FruitMultiplier) * 0.5
                                 + (toolEntry.Duration / 300)
-                            local score = (newCovered * 1000 + totalCovered * 10) * effectWeight
-                            if not bestChoice or score > bestChoice.Score then
+                            local centroidDistance = uncoveredCentroid
+                                and horizontalDistance(candidatePosition, uncoveredCentroid)
+                                or 0
+                            local score = (newCovered * 1000 + totalCovered * 12 + proximityScore * 80
+                                - centroidDistance * 2.5) * effectWeight
+                            local isBetter = false
+                            if not bestChoice then
+                                isBetter = true
+                            elseif score > bestChoice.Score then
+                                isBetter = true
+                            elseif math.abs(score - bestChoice.Score) <= 0.001 then
+                                if proximityScore > (bestChoice.ProximityScore or -math.huge) + 0.001 then
+                                    isBetter = true
+                                elseif math.abs(proximityScore - (bestChoice.ProximityScore or 0)) <= 0.001
+                                    and centroidDistance < (bestChoice.CentroidDistance or math.huge)
+                                then
+                                    isBetter = true
+                                end
+                            end
+                            if isBetter then
                                 bestChoice = {
                                     ToolIndex = toolIndex,
                                     Position = candidatePosition,
                                     Score = score,
                                     NewCovered = newCovered,
-                                    TotalCovered = totalCovered
+                                    TotalCovered = totalCovered,
+                                    ProximityScore = proximityScore,
+                                    CentroidDistance = centroidDistance
                                 }
                             end
                         end
@@ -2117,7 +2645,7 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
         chosenEntry.Remaining = chosenEntry.Remaining - 1
         totalNewCoverage = totalNewCoverage + bestChoice.NewCovered
 
-        markSprinklerCoverage(bestChoice.Position, chosenEntry.Range, plantTargets, coveredState)
+        markSprinklerCoverage(bestChoice.Position, chosenEntry.Range, coverageTargets, coveredState)
         existingSprinklers[#existingSprinklers + 1] = {
             Position = bestChoice.Position,
             Range = chosenEntry.Range,
@@ -2136,18 +2664,25 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
 
         if fallbackToolEntry then
             local bestFallback = nil
+            local fallbackPlantClearance = getSprinklerPlantClearance(fallbackToolEntry.Range)
+            local uncoveredCentroid = computeUncoveredTargetCentroid(coverageTargets, {})
             for _, candidatePosition in ipairs(candidates) do
-                if not isCandidateTooCloseToPlants(candidatePosition, plantTargets, SPRINKLER_PLANT_CLEARANCE) then
-                    local _, totalCovered = computeSprinklerCoverage(
+                if not isCandidateTooCloseToPlants(candidatePosition, plantTargets, fallbackPlantClearance) then
+                    local _, totalCovered, proximityScore = computeSprinklerCoverageWithProximity(
                         candidatePosition,
                         fallbackToolEntry.Range,
-                        plantTargets,
+                        coverageTargets,
                         {}
                     )
-                    if totalCovered > 0 and (not bestFallback or totalCovered > bestFallback.TotalCovered) then
+                    local centroidDistance = uncoveredCentroid
+                        and horizontalDistance(candidatePosition, uncoveredCentroid)
+                        or 0
+                    local fallbackScore = totalCovered * 100 + proximityScore * 20 - centroidDistance * 2.5
+                    if totalCovered > 0 and (not bestFallback or fallbackScore > bestFallback.Score) then
                         bestFallback = {
                             Position = candidatePosition,
-                            TotalCovered = totalCovered
+                            TotalCovered = totalCovered,
+                            Score = fallbackScore
                         }
                     end
                 end
@@ -2167,7 +2702,7 @@ local function buildSmartSprinklerPlan(plot, parts, toolEntries, maxPlacements)
         end
     end
 
-    return placements, totalNewCoverage, #plantTargets
+    return placements, totalNewCoverage, #coverageTargets
 end
 
 local function getSeedCount(tool)
@@ -2458,43 +2993,146 @@ local function hasOwnedSprinklerNearPosition(worldPosition, maxDistance)
     return false
 end
 
-local function buildSprinklerPlacementAttemptSets(plotParts, worldPosition)
+local function resolvePlotRightVector(plotParts, worldPosition)
+    local fallback = Vector3.new(1, 0, 0)
+    if typeof(worldPosition) ~= "Vector3" then
+        return fallback
+    end
+    if type(plotParts) ~= "table" or #plotParts == 0 then
+        return fallback
+    end
+
+    local bestPart = nil
+    local bestDistanceSq = math.huge
+    for _, part in ipairs(plotParts) do
+        if part:IsA("BasePart") then
+            local localPos = part.CFrame:PointToObjectSpace(worldPosition)
+            local halfX = part.Size.X * 0.5
+            local halfZ = part.Size.Z * 0.5
+            local clampedX = math.clamp(localPos.X, -halfX, halfX)
+            local clampedZ = math.clamp(localPos.Z, -halfZ, halfZ)
+            local surfacePoint = part.CFrame:PointToWorldSpace(Vector3.new(clampedX, part.Size.Y * 0.5, clampedZ))
+            local dx = surfacePoint.X - worldPosition.X
+            local dz = surfacePoint.Z - worldPosition.Z
+            local distanceSq = dx * dx + dz * dz
+            if distanceSq < bestDistanceSq then
+                bestDistanceSq = distanceSq
+                bestPart = part
+            end
+        end
+    end
+
+    if bestPart then
+        local right = bestPart.CFrame.RightVector
+        local flatRight = Vector3.new(right.X, 0, right.Z)
+        if flatRight.Magnitude > 0.001 then
+            return flatRight.Unit
+        end
+    end
+
+    return fallback
+end
+
+local function buildSprinklerPlacementAttemptSets(plotParts, worldPosition, plantTargets, plantClearance)
     local primaryPositions = {}
     local fallbackPositions = {}
     if typeof(worldPosition) ~= "Vector3" then
         return primaryPositions, fallbackPositions
     end
 
+    local clearance = math.max(0.1, tonumber(plantClearance) or SPRINKLER_PLANT_CLEARANCE)
     local basePosition = getGroundedSprinklerPosition(plotParts, worldPosition) or worldPosition
-    primaryPositions[#primaryPositions + 1] = basePosition
-
-    local jitter = {
-        Vector3.new(SPRINKLER_POSITION_JITTER_STEP, 0, 0),
-        Vector3.new(-SPRINKLER_POSITION_JITTER_STEP, 0, 0),
-        Vector3.new(0, 0, SPRINKLER_POSITION_JITTER_STEP),
-        Vector3.new(0, 0, -SPRINKLER_POSITION_JITTER_STEP)
+    local anchorPosition = basePosition
+    if type(plantTargets) == "table" and #plantTargets > 0 then
+        local bestPlant = nil
+        local bestDistanceSq = math.huge
+        for _, plantPosition in ipairs(plantTargets) do
+            if typeof(plantPosition) == "Vector3" then
+                local dx = plantPosition.X - basePosition.X
+                local dz = plantPosition.Z - basePosition.Z
+                local distanceSq = dx * dx + dz * dz
+                if distanceSq < bestDistanceSq then
+                    bestDistanceSq = distanceSq
+                    bestPlant = plantPosition
+                end
+            end
+        end
+        if bestPlant then
+            anchorPosition = bestPlant
+        end
+    end
+    local rightVector = resolvePlotRightVector(plotParts, anchorPosition)
+    local ringDirections = {
+        Vector3.new(1, 0, 0),
+        Vector3.new(-1, 0, 0),
+        Vector3.new(0, 0, 1),
+        Vector3.new(0, 0, -1),
+        Vector3.new(0.707, 0, 0.707),
+        Vector3.new(0.707, 0, -0.707),
+        Vector3.new(-0.707, 0, 0.707),
+        Vector3.new(-0.707, 0, -0.707)
     }
 
-    for _, offset in ipairs(jitter) do
-        local offsetPosition = basePosition + offset
-        primaryPositions[#primaryPositions + 1] = getGroundedSprinklerPosition(plotParts, offsetPosition) or offsetPosition
+    local function addCandidate(targetList, candidatePosition, avoidPlants)
+        if typeof(candidatePosition) ~= "Vector3" then
+            return
+        end
+        local grounded = getGroundedSprinklerPosition(plotParts, candidatePosition) or candidatePosition
+        if type(plotParts) == "table"
+            and #plotParts > 0
+            and not isWithinPlotPartsXZ(grounded, plotParts, 0.45)
+        then
+            return
+        end
+        if avoidPlants
+            and type(plantTargets) == "table"
+            and #plantTargets > 0
+            and isCandidateTooCloseToPlants(grounded, plantTargets, clearance)
+        then
+            return
+        end
+        targetList[#targetList + 1] = grounded
     end
 
-    local root = getRootPart()
-    if root and type(plotParts) == "table" and #plotParts > 0 then
-        local nearRoot = getNearestPlantableSurfacePoint(plotParts, root.Position)
-        if typeof(nearRoot) == "Vector3" then
-            fallbackPositions[#fallbackPositions + 1] = nearRoot
-            for _, offset in ipairs(jitter) do
-                local offsetPosition = nearRoot + offset
-                fallbackPositions[#fallbackPositions + 1] = getGroundedSprinklerPosition(plotParts, offsetPosition)
-                    or offsetPosition
-            end
+    local rightShiftRadii = {
+        math.max(clearance + 0.35, 1.05),
+        math.max(clearance + 0.85, 1.55),
+        math.max(clearance + 1.35, 2.05),
+        math.max(clearance + 1.9, 2.55),
+        math.max(clearance + 2.45, 3.05)
+    }
+    for _, radius in ipairs(rightShiftRadii) do
+        addCandidate(primaryPositions, anchorPosition + rightVector * radius, true)
+    end
+
+    local primaryRadii = {
+        math.max(1.0, SPRINKLER_POSITION_JITTER_STEP * 1.2),
+        math.max(1.45, SPRINKLER_POSITION_JITTER_STEP * 1.8),
+        math.max(1.9, SPRINKLER_POSITION_JITTER_STEP * 2.4)
+    }
+    for _, radius in ipairs(primaryRadii) do
+        for _, direction in ipairs(ringDirections) do
+            addCandidate(primaryPositions, basePosition + direction * radius, true)
         end
     end
 
+    local fallbackRadii = {
+        math.max(2.3, SPRINKLER_POSITION_JITTER_STEP * 2.9),
+        math.max(2.9, SPRINKLER_POSITION_JITTER_STEP * 3.6)
+    }
+    for _, radius in ipairs(fallbackRadii) do
+        for _, direction in ipairs(ringDirections) do
+            addCandidate(fallbackPositions, basePosition + direction * radius, false)
+        end
+    end
+
+    addCandidate(fallbackPositions, basePosition, false)
+
     primaryPositions = dedupeWorldPositionsXZ(primaryPositions, 0.45)
     fallbackPositions = dedupeWorldPositionsXZ(fallbackPositions, 0.45)
+    if #primaryPositions == 0 and typeof(basePosition) == "Vector3" then
+        primaryPositions[1] = basePosition
+    end
     return primaryPositions, fallbackPositions
 end
 
@@ -2923,7 +3561,19 @@ tryPlaceSprinkler = function(tool, sprinklerType, targetPosition)
     end
 
     local _, plotParts = getOwnedPlotAndParts()
-    local primaryPositions, fallbackPositions = buildSprinklerPlacementAttemptSets(plotParts, targetPosition)
+    local plantTargets = collectOwnedPlantTargetsForSprinklers(plotParts)
+    local sprinklerRange = 0
+    local sprinklerDefinition = SprinklerDefinitions[sprinklerType]
+    if type(sprinklerDefinition) == "table" then
+        sprinklerRange = tonumber(sprinklerDefinition.Range) or 0
+    end
+    local plantClearance = getSprinklerPlantClearance(sprinklerRange)
+    local primaryPositions, fallbackPositions = buildSprinklerPlacementAttemptSets(
+        plotParts,
+        targetPosition,
+        plantTargets,
+        plantClearance
+    )
     if #primaryPositions == 0 then
         local fallbackPosition = getGroundedSprinklerPosition(plotParts, targetPosition) or targetPosition
         if typeof(fallbackPosition) == "Vector3" then
@@ -2934,7 +3584,7 @@ tryPlaceSprinkler = function(tool, sprinklerType, targetPosition)
         return false, "No sprinkler placement positions available"
     end
 
-    local function attemptPlacementAtPosition(placementPosition, allowFallbacks)
+    local function attemptPlacementAtPosition(placementPosition)
         local movedNearPlacement = moveNearSprinklerPlacement(plotParts, placementPosition)
         if not movedNearPlacement then
             return false, "Could not move near sprinkler placement"
@@ -2967,93 +3617,44 @@ tryPlaceSprinkler = function(tool, sprinklerType, targetPosition)
             return false
         end
 
-        local firedOk, firedErr = pcall(function()
-            UseGearRemote:FireServer(sprinklerType, {
-                position = placementPosition
-            })
-        end)
-        if not firedOk then
-            return false, "Direct remote failed: " .. tostring(firedErr)
-        end
-        if waitForPlacementConfirmation(SPRINKLER_DIRECT_CONFIRM_TIMEOUT) then
-            return true, nil
-        end
-
-        if not allowFallbacks then
-            return false, "Direct remote no confirm"
-        end
-
-        local signalOk, signalErr = triggerSprinklerInputSignalAtWorldPosition(placementPosition)
-        if signalOk and waitForPlacementConfirmation(SPRINKLER_PLACE_CONFIRM_TIMEOUT) then
-            sprinklerLog("Placement confirmed via UserInputService.InputBegan firesignal")
-            return true, nil
+        local fireReason = "Direct remote no confirm"
+        for _ = 1, SPRINKLER_DIRECT_ATTEMPTS_PER_POSITION do
+            local firedOk, firedErr = pcall(function()
+                UseGearRemote:FireServer(sprinklerType, {
+                    position = placementPosition
+                })
+            end)
+            if not firedOk then
+                fireReason = "Direct remote failed: " .. tostring(firedErr)
+            else
+                fireReason = "Direct remote no confirm"
+                if waitForPlacementConfirmation(SPRINKLER_DIRECT_CONFIRM_TIMEOUT) then
+                    return true, nil
+                end
+            end
+            task.wait(0.05)
         end
 
-        local nativeOk, nativeErr = triggerNativeSprinklerInputAtWorldPosition(placementPosition)
-        if nativeOk and waitForPlacementConfirmation(SPRINKLER_PLACE_CONFIRM_TIMEOUT) then
-            sprinklerLog("Placement confirmed via native sprinkler handler (getgc)")
-            return true, nil
-        end
-
-        local activatedOk, activatedErr = activateSprinklerToolAtWorldPosition(tool, placementPosition)
-        if activatedOk and waitForPlacementConfirmation(SPRINKLER_PLACE_CONFIRM_TIMEOUT) then
-            sprinklerLog("Placement confirmed via tool:Activate")
-            return true, nil
-        end
-
-        local mouseOk, mouseErr = simulateSprinklerMousePlaceAtWorldPosition(placementPosition)
-        if mouseOk and waitForPlacementConfirmation(SPRINKLER_PLACE_CONFIRM_TIMEOUT) then
-            sprinklerLog("Placement confirmed via mouse-click fallback")
-            return true, nil
-        end
-
-        return false,
-            "Placement not confirmed (signal="
-                .. tostring(signalErr or "ok")
-                .. " native="
-                .. tostring(nativeErr or "ok")
-                .. " activate="
-                .. tostring(activatedErr or "ok")
-                .. " mouse="
-                .. tostring(mouseErr or "unknown")
-                .. ")"
+        return false, fireReason
     end
 
     local lastReason = "Placement not confirmed"
     for _, attemptPosition in ipairs(primaryPositions) do
-        local placed, reason = attemptPlacementAtPosition(attemptPosition, false)
+        local placed, reason = attemptPlacementAtPosition(attemptPosition)
         if placed then
-            sprinklerLog("Placement confirmed via direct remote (planned attempt)")
+            sprinklerLog("Placement confirmed via direct remote (planned offset)")
             return true, nil
         end
         lastReason = tostring(reason or lastReason)
-    end
-
-    local primaryFallbackPosition = primaryPositions[1]
-    if typeof(primaryFallbackPosition) == "Vector3" then
-        local primaryFallbackPlaced, primaryFallbackReason = attemptPlacementAtPosition(primaryFallbackPosition, true)
-        if primaryFallbackPlaced then
-            return true, nil
-        end
-        lastReason = tostring(primaryFallbackReason or lastReason)
     end
 
     for _, fallbackPosition in ipairs(fallbackPositions) do
-        local placed, reason = attemptPlacementAtPosition(fallbackPosition, false)
+        local placed, reason = attemptPlacementAtPosition(fallbackPosition)
         if placed then
-            sprinklerLog("Placement confirmed via near-player fallback position")
+            sprinklerLog("Placement confirmed via direct remote (fallback offset)")
             return true, nil
         end
         lastReason = tostring(reason or lastReason)
-    end
-
-    local secondaryFallbackPosition = fallbackPositions[1]
-    if typeof(secondaryFallbackPosition) == "Vector3" then
-        local secondaryPlaced, secondaryReason = attemptPlacementAtPosition(secondaryFallbackPosition, true)
-        if secondaryPlaced then
-            return true, nil
-        end
-        lastReason = tostring(secondaryReason or lastReason)
     end
 
     return false, lastReason
@@ -3137,7 +3738,7 @@ function AutoPlantFeature:Tick()
         return
     end
 
-    local positions = buildGridPoints(parts)
+    local positions = buildSprinklerFriendlyPlantOrder(parts)
     if #positions == 0 then
         self:_setStatus("Auto Plant: No candidate positions")
         return
@@ -3623,6 +4224,622 @@ function AutoBuyGearsFeature:Stop()
 end
 
 replaceFeature("AutoBuyGears", AutoBuyGearsFeature)
+
+Hub.AutoBotanistFeature = {
+    Name = "AutoBotanist",
+    Enabled = Hub.Config.AutoBotanist.Enabled,
+    _running = false,
+    _thread = nil,
+    _statusText = "Auto Botanist: Idle",
+    _completed = 0,
+    _donated = 0,
+    _harvested = 0,
+    _failed = 0,
+    _lastFailReason = "none",
+    _lastQuestAt = 0,
+    _lastAppraiseAt = 0,
+    _questMutation = nil,
+    _questTargetWeight = 0,
+    _questTotalWeight = 0,
+    _acceptedMutationMap = {}
+}
+
+function Hub.AutoBotanistFeature:_setStatus(text)
+    self._statusText = text
+    queueUILabelUpdate("AutoBotanist", text)
+end
+
+function Hub.AutoBotanistFeature:_getQuestRemote()
+    return RemoteEvents:FindFirstChild("BotanistQuestRequest")
+end
+
+function Hub.AutoBotanistFeature:_getAppraiseRemote()
+    return RemoteEvents:FindFirstChild("BotanistRequest")
+end
+
+function Hub.AutoBotanistFeature:_teleportToBotanist(force)
+    return teleportByResolver("Botanist", function()
+        local botanistRoot = findChildByPath(getMapPhysical(), {
+            "Botanist",
+            "Botanist",
+            "HumanoidRootPart"
+        })
+        if botanistRoot and botanistRoot:IsA("BasePart") then
+            return botanistRoot.CFrame
+        end
+        return nil
+    end, force, function(targetCFrame)
+        return isNearTargetCFrame(targetCFrame, TELEPORT_ZONE_RADIUS_SHOP)
+    end)
+end
+
+function Hub.AutoBotanistFeature:_invokeQuest(action)
+    local questRemote = self:_getQuestRemote()
+    if not questRemote then
+        return nil, "quest remote missing"
+    end
+
+    local response, err = safeInvoke(questRemote, action)
+    if response == false then
+        return nil, tostring(err or "invoke failed")
+    end
+    if type(response) ~= "table" then
+        return nil, "unexpected response"
+    end
+    return response
+end
+
+function Hub.AutoBotanistFeature:_invokeAppraise()
+    local appraiseRemote = self:_getAppraiseRemote()
+    if not appraiseRemote then
+        return nil, "appraise remote missing"
+    end
+
+    local response, err = safeInvoke(appraiseRemote)
+    if response == false then
+        return nil, tostring(err or "invoke failed")
+    end
+    if type(response) ~= "table" then
+        return nil, "unexpected response"
+    end
+    return response
+end
+
+function Hub.AutoBotanistFeature:_splitMutationList(rawText)
+    local list = {}
+    if type(rawText) ~= "string" then
+        return list
+    end
+
+    for mutationToken in string.gmatch(rawText, "([^,]+)") do
+        local mutation = mutationToken:match("^%s*(.-)%s*$")
+        if mutation ~= "" then
+            list[#list + 1] = mutation
+        end
+    end
+
+    if #list == 0 and rawText ~= "" then
+        list[1] = rawText
+    end
+    return list
+end
+
+function Hub.AutoBotanistFeature:_buildAcceptedMutationMap(questMutation)
+    local accepted = {}
+    local mutation = type(questMutation) == "string" and questMutation or nil
+    if not mutation or mutation == "" then
+        return accepted
+    end
+
+    accepted[mutation] = true
+    local questDefinitions = BotanistDefinitions and BotanistDefinitions.MutationQuests
+    local questDefinition = type(questDefinitions) == "table" and questDefinitions[mutation] or nil
+    local acceptedMutations = questDefinition and questDefinition.AcceptedMutations
+    if type(acceptedMutations) == "table" then
+        for _, acceptedMutation in ipairs(acceptedMutations) do
+            if type(acceptedMutation) == "string" and acceptedMutation ~= "" then
+                accepted[acceptedMutation] = true
+            end
+        end
+    end
+
+    local legacyMap = BotanistDefinitions and BotanistDefinitions.LegacyQuestMap
+    if type(legacyMap) == "table" then
+        local mappedMutation = legacyMap[mutation]
+        if type(mappedMutation) == "string" and mappedMutation ~= "" then
+            accepted[mappedMutation] = true
+        end
+        for oldMutation, normalizedMutation in pairs(legacyMap) do
+            if normalizedMutation == mutation and type(oldMutation) == "string" and oldMutation ~= "" then
+                accepted[oldMutation] = true
+            end
+        end
+    end
+
+    return accepted
+end
+
+function Hub.AutoBotanistFeature:_mutationMatchesAccepted(rawMutation)
+    if type(self._acceptedMutationMap) ~= "table" or next(self._acceptedMutationMap) == nil then
+        return false
+    end
+
+    local mutations = self:_splitMutationList(rawMutation or "")
+    for _, mutation in ipairs(mutations) do
+        if self._acceptedMutationMap[mutation] == true then
+            return true
+        end
+    end
+    return false
+end
+
+function Hub.AutoBotanistFeature:_refreshQuestState(response)
+    local status = tostring(response and response.Status or "unknown")
+
+    if status == "new_quest" or status == "quest_reminder" or status == "progress" then
+        self._questMutation = tostring(response.Mutation or self._questMutation or "")
+        self._questTargetWeight = tonumber(response.TargetWeight) or self._questTargetWeight or 0
+        self._questTotalWeight = tonumber(response.TotalWeight) or self._questTotalWeight or 0
+    elseif status == "complete" then
+        local newQuest = type(response.NewQuest) == "table" and response.NewQuest or nil
+        if newQuest then
+            self._questMutation = tostring(newQuest.Mutation or "")
+            self._questTargetWeight = tonumber(newQuest.TargetWeight) or 0
+            self._questTotalWeight = tonumber(newQuest.TotalWeight) or 0
+        else
+            self._questMutation = self._questMutation or ""
+            self._questTotalWeight = self._questTargetWeight
+        end
+    elseif status == "no_active_quest" then
+        self._questMutation = nil
+        self._questTargetWeight = 0
+        self._questTotalWeight = 0
+    end
+
+    if type(self._questMutation) == "string" and self._questMutation ~= "" then
+        self._acceptedMutationMap = self:_buildAcceptedMutationMap(self._questMutation)
+    else
+        self._acceptedMutationMap = {}
+    end
+end
+
+function Hub.AutoBotanistFeature:_remainingQuestWeight()
+    local targetWeight = math.max(0, tonumber(self._questTargetWeight) or 0)
+    local totalWeight = math.max(0, tonumber(self._questTotalWeight) or 0)
+    return math.max(0, targetWeight - totalWeight)
+end
+
+function Hub.AutoBotanistFeature:_collectMatchingHarvestedTools()
+    local tools = {}
+
+    local function collect(container)
+        if not container then
+            return
+        end
+
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") and tool:GetAttribute("IsHarvested") and not tool:GetAttribute("IsCrate") then
+                local rawMutation = tool:GetAttribute("Mutation")
+                local hasKnownMutation = type(rawMutation) == "string" and rawMutation ~= ""
+                local isAcceptedMutation = hasKnownMutation and self:_mutationMatchesAccepted(rawMutation)
+                if isAcceptedMutation or not hasKnownMutation then
+                    tools[#tools + 1] = {
+                        Tool = tool,
+                        Accepted = isAcceptedMutation
+                    }
+                end
+            end
+        end
+    end
+
+    collect(LocalPlayer.Character)
+    collect(LocalPlayer:FindFirstChildOfClass("Backpack"))
+
+    table.sort(tools, function(a, b)
+        if a.Accepted ~= b.Accepted then
+            return a.Accepted == true
+        end
+        return tostring(a.Tool.Name) < tostring(b.Tool.Name)
+    end)
+
+    return tools
+end
+
+function Hub.AutoBotanistFeature:_donateSingleMatchingTool()
+    local matchingTools = self:_collectMatchingHarvestedTools()
+    if #matchingTools == 0 then
+        return false, "no_matching_tool"
+    end
+
+    for _, entry in ipairs(matchingTools) do
+        local tool = entry.Tool
+        if not tool or not tool.Parent then
+            continue
+        end
+
+        local equipped = equipTool(tool)
+        if not equipped then
+            continue
+        end
+
+        local response, err = self:_invokeQuest("TurnInSingle")
+        if not response then
+            return false, tostring(err or "TurnInSingle failed")
+        end
+
+        local donateStatus = tostring(response.Status or "unknown")
+        self:_refreshQuestState(response)
+
+        if donateStatus == "progress" or donateStatus == "complete" then
+            self._donated = self._donated + 1
+            if donateStatus == "complete" then
+                self._completed = self._completed + 1
+            end
+            self._lastFailReason = "none"
+            return true, donateStatus, response
+        end
+
+        if donateStatus == "no_tool"
+            or donateStatus == "not_harvested"
+            or donateStatus == "favorited"
+            or donateStatus == "no_mutation"
+            or donateStatus == "unknown_mutation"
+            or donateStatus == "wrong_mutation"
+        then
+            continue
+        end
+
+        return false, donateStatus, response
+    end
+
+    return false, "no_usable_tool"
+end
+
+function Hub.AutoBotanistFeature:_harvestSingleMatchingCrop()
+    if type(self._questMutation) ~= "string" or self._questMutation == "" then
+        return false, "no_active_quest"
+    end
+
+    local candidates = collectOwnedHarvestCandidates({
+        IgnorePlantTypeFilter = true,
+        IgnoreStageFilter = true,
+        CustomFilter = function(_, _, _, _, mutation)
+            return self:_mutationMatchesAccepted(mutation)
+        end
+    })
+
+    if #candidates == 0 then
+        local teleported, teleportReason = teleportToGarden()
+        if not teleported then
+            return false, "Garden TP failed (" .. tostring(teleportReason or "unknown") .. ")"
+        end
+
+        candidates = collectOwnedHarvestCandidates({
+            IgnorePlantTypeFilter = true,
+            IgnoreStageFilter = true,
+            CustomFilter = function(_, _, _, _, mutation)
+                return self:_mutationMatchesAccepted(mutation)
+            end
+        })
+    end
+
+    if #candidates == 0 then
+        return false, "no matching quest crops"
+    end
+
+    local target = candidates[1]
+    local targetPosition = target.Position or getPlantPosition(target.TargetModel)
+    if not targetPosition then
+        return false, "target position unavailable"
+    end
+
+    local movedClose = ensureInHarvestRange(targetPosition)
+    if not movedClose then
+        return false, "could not move into harvest range"
+    end
+
+    local sentOk, sentErr = pcall(function()
+        HarvestFruitRemote:FireServer({ target.Payload })
+    end)
+    if not sentOk then
+        return false, tostring(sentErr or "harvest remote failed")
+    end
+
+    self._harvested = self._harvested + 1
+    local targetModel = target.TargetModel
+    if targetModel and targetModel.Parent then
+        targetModel:SetAttribute("IsHarvested", true)
+        task.delay(3, function()
+            if targetModel and targetModel.Parent then
+                targetModel:SetAttribute("IsHarvested", nil)
+            end
+        end)
+    end
+
+    return true, target
+end
+
+function Hub.AutoBotanistFeature:_getHeldHarvestedTool()
+    local character = LocalPlayer.Character
+    local equippedTool = character and character:FindFirstChildOfClass("Tool")
+    if equippedTool and equippedTool:GetAttribute("IsHarvested") then
+        return equippedTool
+    end
+    return nil
+end
+
+function Hub.AutoBotanistFeature:SetEnabled(enabled)
+    self.Enabled = not not enabled
+    if not self.Enabled then
+        self._questMutation = nil
+        self._questTargetWeight = 0
+        self._questTotalWeight = 0
+        self._acceptedMutationMap = {}
+        self:_setStatus("Auto Botanist: Disabled")
+        return
+    end
+
+    local modeParts = {}
+    if Hub.Config.AutoBotanist.AutoRequestQuest then
+        table.insert(modeParts, "GetQuest")
+    end
+    if Hub.Config.AutoBotanist.AutoDonateAll then
+        table.insert(modeParts, "QuestLoop")
+    end
+    if Hub.Config.AutoBotanist.AutoAppraiseHeld then
+        table.insert(modeParts, "AppraiseHeld")
+    end
+    if #modeParts <= 0 then
+        table.insert(modeParts, "Idle")
+    end
+    self:_setStatus("Auto Botanist: Enabled (" .. table.concat(modeParts, ", ") .. ")")
+end
+
+function Hub.AutoBotanistFeature:Tick()
+    if not self.Enabled or Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+        return
+    end
+
+    local now = tick()
+    if (Hub.Config.AutoBotanist.AutoRequestQuest or not self._questMutation)
+        and now - (self._lastQuestAt or 0) >= 6
+    then
+        self._lastQuestAt = now
+        local questResponse, questError = self:_invokeQuest("GetQuest")
+        if not questResponse then
+            self._failed = self._failed + 1
+            self._lastFailReason = tostring(questError or "GetQuest failed")
+            self:_setStatus("Auto Botanist: GetQuest failed (" .. self._lastFailReason .. ")")
+            return
+        end
+
+        self:_refreshQuestState(questResponse)
+        local questStatus = tostring(questResponse.Status or "unknown")
+        if questStatus == "new_quest" then
+            self:_setStatus(
+                string.format(
+                    "Auto Botanist: New quest %s %.2fkg (Need %.2fkg)",
+                    tostring(questResponse.Mutation or "?"),
+                    tonumber(questResponse.TargetWeight) or 0,
+                    self:_remainingQuestWeight()
+                )
+            )
+        elseif questStatus == "quest_reminder" then
+            self:_setStatus(
+                string.format(
+                    "Auto Botanist: Quest %s %.2f/%.2fkg",
+                    tostring(questResponse.Mutation or "?"),
+                    tonumber(questResponse.TotalWeight) or 0,
+                    tonumber(questResponse.TargetWeight) or 0
+                )
+            )
+        elseif questStatus == "no_active_quest" then
+            if Hub.Config.AutoBotanist.TeleportToBotanist then
+                local teleported, teleportReason = self:_teleportToBotanist(false)
+                if not teleported then
+                    self:_setStatus("Auto Botanist: No active quest (TP failed: " .. tostring(teleportReason or "unknown") .. ")")
+                else
+                    self:_setStatus("Auto Botanist: No active quest (TPed to Botanist)")
+                end
+            else
+                self:_setStatus("Auto Botanist: No active quest")
+            end
+            return
+        elseif questStatus ~= "error" and questStatus ~= "no_active_quest" then
+            self:_setStatus("Auto Botanist: Quest status - " .. questStatus)
+        end
+    end
+
+    if Hub.Config.AutoBotanist.AutoDonateAll then
+        if type(self._questMutation) ~= "string" or self._questMutation == "" then
+            self:_setStatus("Auto Botanist: No active quest")
+            return
+        end
+
+        local donateCount = 0
+        local lastDonateStatus = nil
+        for _ = 1, 4 do
+            if self:_remainingQuestWeight() <= 0 then
+                break
+            end
+
+            local donated, donateStatus, donateResponse = self:_donateSingleMatchingTool()
+            lastDonateStatus = donateStatus
+            if donated then
+                donateCount = donateCount + 1
+                if donateStatus == "complete" then
+                    self:_setStatus(
+                        string.format(
+                            "Auto Botanist: Quest complete (%sx %s) Completed=%d Donated=%d Harvested=%d",
+                            tostring(tonumber(donateResponse.RewardCount) or 0),
+                            tostring(donateResponse.RewardName or "reward"),
+                            self._completed,
+                            self._donated,
+                            self._harvested
+                        )
+                    )
+                    return
+                end
+            else
+                if donateStatus == "no_matching_tool" or donateStatus == "no_usable_tool" then
+                    break
+                end
+                if donateStatus == "no_active_quest" then
+                    if Hub.Config.AutoBotanist.TeleportToBotanist then
+                        local teleported, teleportReason = self:_teleportToBotanist(false)
+                        if not teleported then
+                            self:_setStatus("Auto Botanist: No active quest (TP failed: " .. tostring(teleportReason or "unknown") .. ")")
+                        else
+                            self:_setStatus("Auto Botanist: No active quest (TPed to Botanist)")
+                        end
+                    else
+                        self:_setStatus("Auto Botanist: No active quest")
+                    end
+                    return
+                end
+                if donateStatus == "inventory_full" then
+                    self:_setStatus("Auto Botanist: Inventory full for reward")
+                    return
+                end
+                if donateStatus == "error" then
+                    self._failed = self._failed + 1
+                    self._lastFailReason = "TurnInSingle error"
+                    self:_setStatus("Auto Botanist: Donate failed (" .. self._lastFailReason .. ")")
+                    return
+                end
+                break
+            end
+        end
+
+        if self:_remainingQuestWeight() > 0 then
+            local harvested, harvestInfo = self:_harvestSingleMatchingCrop()
+            if harvested then
+                local target = harvestInfo
+                self._lastFailReason = "none"
+                self:_setStatus(
+                    string.format(
+                        "Auto Botanist: Harvested %s (%s). Quest %s %.2f/%.2fkg",
+                        tostring(target.PlantType or "crop"),
+                        tostring((type(target.Mutation) == "string" and target.Mutation ~= "") and target.Mutation or "?"),
+                        tostring(self._questMutation or "?"),
+                        tonumber(self._questTotalWeight) or 0,
+                        tonumber(self._questTargetWeight) or 0
+                    )
+                )
+                return
+            end
+
+            if donateCount > 0 then
+                self:_setStatus(
+                    string.format(
+                        "Auto Botanist: Donated=%d Quest %s %.2f/%.2fkg",
+                        donateCount,
+                        tostring(self._questMutation or "?"),
+                        tonumber(self._questTotalWeight) or 0,
+                        tonumber(self._questTargetWeight) or 0
+                    )
+                )
+                return
+            end
+
+            self:_setStatus(
+                string.format(
+                    "Auto Botanist: Waiting for %s crops (%s)",
+                    tostring(self._questMutation or "?"),
+                    tostring(harvestInfo or lastDonateStatus or "none")
+                )
+            )
+            return
+        else
+            self._lastFailReason = "none"
+            self:_setStatus(
+                string.format(
+                    "Auto Botanist: Quest target reached, syncing... %s %.2f/%.2fkg",
+                    tostring(self._questMutation or "?"),
+                    tonumber(self._questTotalWeight) or 0,
+                    tonumber(self._questTargetWeight) or 0
+                )
+            )
+            return
+        end
+    end
+
+    if Hub.Config.AutoBotanist.AutoAppraiseHeld
+        and now - (self._lastAppraiseAt or 0) >= 3
+        and self:_getHeldHarvestedTool()
+    then
+        self._lastAppraiseAt = now
+        local appraiseResponse, appraiseError = self:_invokeAppraise()
+        if not appraiseResponse then
+            self._failed = self._failed + 1
+            self._lastFailReason = tostring(appraiseError or "appraise failed")
+            self:_setStatus("Auto Botanist: Appraise failed (" .. self._lastFailReason .. ")")
+            return
+        end
+
+        local appraiseStatus = tostring(appraiseResponse.Status or "unknown")
+        if appraiseStatus == "success" then
+            self._lastFailReason = "none"
+            self:_setStatus("Auto Botanist: Appraised mutation " .. tostring(appraiseResponse.Mutation or "?"))
+            return
+        end
+        if appraiseStatus == "insufficient_funds" then
+            self:_setStatus("Auto Botanist: Appraise skipped (insufficient funds)")
+            return
+        end
+        if appraiseStatus == "no_tool" then
+            self:_setStatus("Auto Botanist: Equip harvested crop for appraise")
+            return
+        end
+        if appraiseStatus ~= "error" then
+            self:_setStatus("Auto Botanist: Appraise status - " .. appraiseStatus)
+            return
+        end
+    end
+
+    if type(self._questMutation) == "string" and self._questMutation ~= "" then
+        self:_setStatus(
+            string.format(
+                "Auto Botanist: Quest %s %.2f/%.2fkg",
+                tostring(self._questMutation),
+                tonumber(self._questTotalWeight) or 0,
+                tonumber(self._questTargetWeight) or 0
+            )
+        )
+        return
+    end
+
+    self:_setStatus("Auto Botanist: Waiting for quest")
+end
+
+function Hub.AutoBotanistFeature:Start()
+    if self._running then
+        return
+    end
+    self._running = true
+    self:_setStatus(self._statusText)
+    self._thread = task.spawn(function()
+        while self._running and not Hub.IsUnloaded and Hub.RunId == CurrentRunId do
+            local ok, err = pcall(function()
+                self:Tick()
+            end)
+            if not ok then
+                self._failed = self._failed + 1
+                self._lastFailReason = tostring(err)
+                self:_setStatus("Auto Botanist: Error - " .. tostring(err))
+            end
+            task.wait(AUTO_BUY_LOOP_DELAY)
+        end
+    end)
+end
+
+function Hub.AutoBotanistFeature:Stop()
+    self._running = false
+    self._thread = nil
+    self:_setStatus("Auto Botanist: Stopped")
+end
+
+replaceFeature("AutoBotanist", Hub.AutoBotanistFeature)
 
 local AutoSprinklerFeature = {
     Name = "AutoSprinkler",
@@ -4449,6 +5666,337 @@ end
 
 replaceFeature("AntiAFK", AntiAFKFeature)
 
+Hub.FPSBoostFeature = {
+    Name = "FPSBoost",
+    Enabled = Hub.Config.FPSBoost.Enabled,
+    _running = false,
+    _thread = nil,
+    _statusText = "FPS Boost: Idle",
+    _backup = setmetatable({}, { __mode = "k" }),
+    _connections = {},
+    _optimizedInstances = 0,
+    _cullParts = setmetatable({}, { __mode = "k" })
+}
+
+function Hub.FPSBoostFeature:_setStatus(text)
+    self._statusText = tostring(text or "FPS Boost: Idle")
+    queueUILabelUpdate("FPSBoost", self._statusText)
+end
+
+function Hub.FPSBoostFeature:_rememberAndSet(target, propertyName, newValue)
+    if target == nil then
+        return false
+    end
+
+    local okRead, currentValue = pcall(function()
+        return target[propertyName]
+    end)
+    if not okRead then
+        return false
+    end
+    if currentValue == newValue then
+        return false
+    end
+
+    local state = self._backup[target]
+    if state == nil then
+        state = {}
+        self._backup[target] = state
+    end
+    if state[propertyName] == nil then
+        state[propertyName] = {
+            HasValue = true,
+            Value = currentValue
+        }
+    end
+
+    local okWrite = pcall(function()
+        target[propertyName] = newValue
+    end)
+    return okWrite
+end
+
+function Hub.FPSBoostFeature:_disconnectConnections()
+    for _, connection in ipairs(self._connections) do
+        if connection then
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
+    end
+    self._connections = {}
+end
+
+function Hub.FPSBoostFeature:_restoreAll()
+    local restored = 0
+    for target, state in pairs(self._backup) do
+        if state then
+            for propertyName, entry in pairs(state) do
+                if type(entry) == "table" and entry.HasValue then
+                    local okWrite = pcall(function()
+                        target[propertyName] = entry.Value
+                    end)
+                    if okWrite then
+                        restored = restored + 1
+                    end
+                end
+            end
+        end
+    end
+    self._backup = setmetatable({}, { __mode = "k" })
+    return restored
+end
+
+function Hub.FPSBoostFeature:_isCharacterDescendant(instance)
+    if instance == nil then
+        return false
+    end
+    local model = instance:FindFirstAncestorOfClass("Model")
+    if model == nil then
+        return false
+    end
+    return Players:GetPlayerFromCharacter(model) ~= nil
+end
+
+function Hub.FPSBoostFeature:_trackCullPart(instance)
+    if instance == nil or not instance:IsA("BasePart") then
+        return
+    end
+    if self:_isCharacterDescendant(instance) then
+        return
+    end
+    self._cullParts[instance] = true
+end
+
+function Hub.FPSBoostFeature:_updateDistanceCulling()
+    local camera = workspace.CurrentCamera
+    if camera == nil then
+        return 0
+    end
+
+    local changed = 0
+    local cameraPosition = camera.CFrame.Position
+    local cullDistance = 180
+    for part in pairs(self._cullParts) do
+        if part and part.Parent and part:IsA("BasePart") then
+            local delta = part.Position - cameraPosition
+            local hide = delta:Dot(delta) > (cullDistance * cullDistance)
+            local targetModifier = hide and 1 or 0
+            if self:_rememberAndSet(part, "LocalTransparencyModifier", targetModifier) then
+                changed = changed + 1
+            end
+        else
+            self._cullParts[part] = nil
+        end
+    end
+    return changed
+end
+
+function Hub.FPSBoostFeature:_optimizeInstance(instance)
+    if instance == nil then
+        return false
+    end
+
+    local changed = false
+    if instance:IsA("ParticleEmitter") then
+        changed = self:_rememberAndSet(instance, "Enabled", false) or changed
+        changed = self:_rememberAndSet(instance, "Rate", 0) or changed
+    elseif instance:IsA("Trail") or instance:IsA("Beam") then
+        changed = self:_rememberAndSet(instance, "Enabled", false) or changed
+    elseif instance:IsA("Smoke") or instance:IsA("Fire") or instance:IsA("Sparkles") then
+        changed = self:_rememberAndSet(instance, "Enabled", false) or changed
+    elseif instance:IsA("PointLight") or instance:IsA("SpotLight") or instance:IsA("SurfaceLight") then
+        changed = self:_rememberAndSet(instance, "Enabled", false) or changed
+    elseif instance:IsA("PostEffect") then
+        changed = self:_rememberAndSet(instance, "Enabled", false) or changed
+    elseif instance:IsA("Decal") or instance:IsA("Texture") then
+        changed = self:_rememberAndSet(instance, "Transparency", 1) or changed
+    elseif instance:IsA("Atmosphere") then
+        changed = self:_rememberAndSet(instance, "Density", 0) or changed
+        changed = self:_rememberAndSet(instance, "Haze", 0) or changed
+        changed = self:_rememberAndSet(instance, "Glare", 0) or changed
+    end
+
+    if instance:IsA("BasePart") then
+        changed = self:_rememberAndSet(instance, "CastShadow", false) or changed
+        changed = self:_rememberAndSet(instance, "Reflectance", 0) or changed
+        local plasticMaterial = nil
+        pcall(function()
+            plasticMaterial = Enum.Material.Plastic
+        end)
+        if plasticMaterial ~= nil then
+            changed = self:_rememberAndSet(instance, "Material", plasticMaterial) or changed
+        end
+        self:_trackCullPart(instance)
+    end
+
+    return changed
+end
+
+function Hub.FPSBoostFeature:_applyWorldOptimizations()
+    local changedCount = 0
+    self._cullParts = setmetatable({}, { __mode = "k" })
+    for _, instance in ipairs(game:GetDescendants()) do
+        if self:_optimizeInstance(instance) then
+            changedCount = changedCount + 1
+        end
+    end
+    self._optimizedInstances = changedCount
+    return changedCount
+end
+
+function Hub.FPSBoostFeature:_applyGlobalOptimizations()
+    local changedCount = 0
+    local lighting = game:GetService("Lighting")
+    local qualityLevelLow = nil
+    pcall(function()
+        qualityLevelLow = Enum.QualityLevel.Level01
+    end)
+    local savedQualityLow = nil
+    pcall(function()
+        savedQualityLow = Enum.SavedQualitySetting.QualityLevel1
+    end)
+    local compatibilityTech = nil
+    pcall(function()
+        compatibilityTech = Enum.Technology.Compatibility
+    end)
+
+    local okSettings, appSettings = pcall(function()
+        return settings()
+    end)
+    if okSettings and appSettings and appSettings.Rendering then
+        local renderSettings = appSettings.Rendering
+        local qualityChanged = false
+        if qualityLevelLow ~= nil then
+            qualityChanged = self:_rememberAndSet(renderSettings, "QualityLevel", qualityLevelLow)
+        end
+        if not qualityChanged and savedQualityLow ~= nil then
+            qualityChanged = self:_rememberAndSet(renderSettings, "QualityLevel", savedQualityLow)
+        end
+        if qualityChanged then
+            changedCount = changedCount + 1
+        end
+    end
+
+    changedCount = changedCount + (self:_rememberAndSet(lighting, "GlobalShadows", false) and 1 or 0)
+    changedCount = changedCount + (self:_rememberAndSet(lighting, "EnvironmentDiffuseScale", 0) and 1 or 0)
+    changedCount = changedCount + (self:_rememberAndSet(lighting, "EnvironmentSpecularScale", 0) and 1 or 0)
+    changedCount = changedCount + (self:_rememberAndSet(lighting, "FogEnd", 100000) and 1 or 0)
+
+    if compatibilityTech ~= nil then
+        changedCount = changedCount + (self:_rememberAndSet(lighting, "Technology", compatibilityTech) and 1 or 0)
+    end
+
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        changedCount = changedCount + (self:_rememberAndSet(terrain, "Decoration", false) and 1 or 0)
+        changedCount = changedCount + (self:_rememberAndSet(terrain, "WaterWaveSize", 0) and 1 or 0)
+        changedCount = changedCount + (self:_rememberAndSet(terrain, "WaterWaveSpeed", 0) and 1 or 0)
+        changedCount = changedCount + (self:_rememberAndSet(terrain, "WaterReflectance", 0) and 1 or 0)
+        changedCount = changedCount + (self:_rememberAndSet(terrain, "WaterTransparency", 1) and 1 or 0)
+    end
+
+    return changedCount
+end
+
+function Hub.FPSBoostFeature:_applyExecutorOptimizations()
+    local targetFPS = math.max(60, math.min(500, math.floor(tonumber(Hub.Config.FPSBoost.TargetFPS) or 360)))
+    local applied = {}
+
+    if type(setfpscap) == "function" then
+        local okSetCap = pcall(function()
+            setfpscap(targetFPS)
+        end)
+        if okSetCap then
+            applied[#applied + 1] = "setfpscap=" .. tostring(targetFPS)
+        end
+    end
+
+    if #applied == 0 then
+        return "none"
+    end
+    return table.concat(applied, ", ")
+end
+
+function Hub.FPSBoostFeature:_attachOptimizationHooks()
+    self:_disconnectConnections()
+    self._connections[#self._connections + 1] = game.DescendantAdded:Connect(function(instance)
+        if not self._running or Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+        self:_optimizeInstance(instance)
+    end)
+end
+
+function Hub.FPSBoostFeature:ApplyNow()
+    if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+        return
+    end
+
+    local globalChanges = self:_applyGlobalOptimizations()
+    local worldChanges = self:_applyWorldOptimizations()
+    local cullChanges = self:_updateDistanceCulling()
+    local envSummary = self:_applyExecutorOptimizations()
+
+    self:_setStatus(
+        string.format(
+            "FPS Boost: Active (World=%d Cull=%d Global=%d Env=%s)",
+            worldChanges,
+            cullChanges,
+            globalChanges,
+            envSummary
+        )
+    )
+end
+
+function Hub.FPSBoostFeature:SetEnabled(enabled)
+    self.Enabled = not not enabled
+    if not self.Enabled then
+        self:_setStatus("FPS Boost: Disabled")
+    else
+        self:_setStatus("FPS Boost: Enabled")
+    end
+end
+
+function Hub.FPSBoostFeature:Start()
+    if self._running then
+        self:ApplyNow()
+        return
+    end
+
+    self._running = true
+    self:_attachOptimizationHooks()
+    self:ApplyNow()
+    self._thread = task.spawn(function()
+        local counter = 0
+        while self._running and not Hub.IsUnloaded and Hub.RunId == CurrentRunId do
+            local okApply, applyErr = pcall(function()
+                counter = counter + 1
+                self:_updateDistanceCulling()
+                if counter % 20 == 0 then
+                    self:_applyGlobalOptimizations()
+                    self:_applyExecutorOptimizations()
+                end
+            end)
+            if not okApply then
+                self:_setStatus("FPS Boost: Error - " .. tostring(applyErr))
+            end
+            task.wait(0.8)
+        end
+    end)
+end
+
+function Hub.FPSBoostFeature:Stop()
+    self._running = false
+    self._thread = nil
+    self:_disconnectConnections()
+    self._cullParts = setmetatable({}, { __mode = "k" })
+    local restored = self:_restoreAll()
+    self:_setStatus("FPS Boost: Stopped (Restored=" .. tostring(restored) .. ")")
+end
+
+replaceFeature("FPSBoost", Hub.FPSBoostFeature)
+
 local function stopAllFeatures()
     if Hub.Config.AutoPlant then
         Hub.Config.AutoPlant.Enabled = false
@@ -4458,6 +6006,9 @@ local function stopAllFeatures()
     end
     if Hub.Config.AutoBuyGears then
         Hub.Config.AutoBuyGears.Enabled = false
+    end
+    if Hub.Config.AutoBotanist then
+        Hub.Config.AutoBotanist.Enabled = false
     end
     if Hub.Config.AutoSprinkler then
         Hub.Config.AutoSprinkler.Enabled = false
@@ -4470,6 +6021,9 @@ local function stopAllFeatures()
     end
     if Hub.Config.AntiAFK then
         Hub.Config.AntiAFK.Enabled = false
+    end
+    if Hub.Config.FPSBoost then
+        Hub.Config.FPSBoost.Enabled = false
     end
 
     for _, feature in pairs(Hub.Features) do
@@ -4491,6 +6045,7 @@ end
 local function unloadHub()
     Hub.RunId = (Hub.RunId or 0) + 1
     Hub.IsUnloaded = true
+    Hub.StockTimerLoopRunning = false
     stopAllFeatures()
     Hub.Features = {}
     Hub.PendingUILabelUpdates = {}
@@ -4511,7 +6066,7 @@ local function unloadHub()
     Hub.UI = nil
 end
 
-local function setAutoPlantEnabled(enabled)
+function setAutoPlantEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4527,7 +6082,7 @@ local function setAutoPlantEnabled(enabled)
     end
 end
 
-local function setAutoBuySeedsEnabled(enabled)
+function setAutoBuySeedsEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4543,7 +6098,7 @@ local function setAutoBuySeedsEnabled(enabled)
     end
 end
 
-local function setAutoBuyGearsEnabled(enabled)
+function setAutoBuyGearsEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4559,7 +6114,23 @@ local function setAutoBuyGearsEnabled(enabled)
     end
 end
 
-local function setAutoSprinklerEnabled(enabled)
+function setAutoBotanistEnabled(enabled)
+    local nextState = not not enabled
+    if Hub.IsUnloaded and nextState then
+        nextState = false
+    end
+
+    Hub.Config.AutoBotanist.Enabled = nextState
+    Hub.AutoBotanistFeature:SetEnabled(nextState)
+
+    if nextState then
+        Hub.AutoBotanistFeature:Start()
+    else
+        Hub.AutoBotanistFeature:Stop()
+    end
+end
+
+function setAutoSprinklerEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4575,7 +6146,7 @@ local function setAutoSprinklerEnabled(enabled)
     end
 end
 
-local function setAutoSellEnabled(enabled)
+function setAutoSellEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4591,7 +6162,7 @@ local function setAutoSellEnabled(enabled)
     end
 end
 
-local function setAutoHarvestEnabled(enabled)
+function setAutoHarvestEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4607,7 +6178,7 @@ local function setAutoHarvestEnabled(enabled)
     end
 end
 
-local function setAntiAFKEnabled(enabled)
+function setAntiAFKEnabled(enabled)
     local nextState = not not enabled
     if Hub.IsUnloaded and nextState then
         nextState = false
@@ -4623,7 +6194,23 @@ local function setAntiAFKEnabled(enabled)
     end
 end
 
-local function loadRemoteModule(url, label)
+function setFPSBoostEnabled(enabled)
+    local nextState = not not enabled
+    if Hub.IsUnloaded and nextState then
+        nextState = false
+    end
+
+    Hub.Config.FPSBoost.Enabled = nextState
+    Hub.FPSBoostFeature:SetEnabled(nextState)
+
+    if nextState then
+        Hub.FPSBoostFeature:Start()
+    else
+        Hub.FPSBoostFeature:Stop()
+    end
+end
+
+function loadRemoteModule(url, label)
     local ok, moduleOrError = pcall(function()
         return loadstring(game:HttpGet(url))()
     end)
@@ -4634,7 +6221,7 @@ local function loadRemoteModule(url, label)
     return moduleOrError
 end
 
-local function setupObsidianUI()
+function setupObsidianUI()
     local existingUI = Hub.UI
     if existingUI and existingUI.Library and type(existingUI.Library.Unload) == "function" then
         pcall(function()
@@ -4649,6 +6236,13 @@ local function setupObsidianUI()
     end
     local ThemeManager = loadRemoteModule(repoBase .. "addons/ThemeManager.lua", "Obsidian ThemeManager")
     local SaveManager = loadRemoteModule(repoBase .. "addons/SaveManager.lua", "Obsidian SaveManager")
+    local TrustsenseAuroraTheme = {
+        FontColor = Color3.fromRGB(228, 237, 233),
+        MainColor = Color3.fromRGB(20, 28, 30),
+        AccentColor = Color3.fromRGB(92, 184, 161),
+        BackgroundColor = Color3.fromRGB(12, 18, 20),
+        OutlineColor = Color3.fromRGB(47, 67, 68)
+    }
 
     local Window = Library:CreateWindow({
         Title = "Trustsense Hub",
@@ -4663,24 +6257,26 @@ local function setupObsidianUI()
         Settings = Window:AddTab("Settings", "settings")
     }
 
-    local autoPlantGroup = Tabs.Main:AddLeftGroupbox("Auto Plant")
-    local autoHarvestGroup = Tabs.Main:AddLeftGroupbox("Auto Harvest")
-    local smartSprinklerGroup = Tabs.Main:AddLeftGroupbox("Smart Sprinkler (WIP)")
+    local autoPlantGroup = Tabs.Main:AddLeftGroupbox("Plant")
+    local autoHarvestGroup = Tabs.Main:AddLeftGroupbox("Harvest")
     local discordGroup = Tabs.Main:AddRightGroupbox("Discord")
-    local antiAFKGroup = Tabs.Main:AddRightGroupbox("Anti AFK")
-    local autoBuySeedsGroup = Tabs.Main:AddRightGroupbox("Auto Buy Seeds")
-    local autoBuyGearsGroup = Tabs.Main:AddRightGroupbox("Auto Buy Gears")
-    local autoSellGroup = Tabs.Main:AddRightGroupbox("Auto Sell")
+    local smartSprinklerGroup = Tabs.Main:AddRightGroupbox("Sprinkler")
+    local antiAFKGroup = Tabs.Main:AddRightGroupbox("Stay Online")
 
-    local plotRankingsGroup = Tabs.Plot:AddLeftGroupbox("Plant Value Rankings")
-    local seedStockGroup = Tabs.Plot:AddLeftGroupbox("Seed Stock")
-    local gearStockGroup = Tabs.Plot:AddRightGroupbox("Gear Stock")
+    local autoBuySeedsGroup = Tabs.Plot:AddLeftGroupbox("Seeds")
+    local plotRankingsGroup = Tabs.Plot:AddLeftGroupbox("Top Plants")
+    local autoBuyGearsGroup = Tabs.Plot:AddRightGroupbox("Gears")
+    local botanistGroup = Tabs.Plot:AddRightGroupbox("Botanist")
+    local autoSellGroup = Tabs.Plot:AddRightGroupbox("Sell")
 
-    local uiGroup = Tabs.Settings:AddLeftGroupbox("UI")
-    local teleportGroup = Tabs.Settings:AddRightGroupbox("Teleports")
+    local teleportGroup = Tabs.Main:AddRightGroupbox("Teleport")
+    local uiGroup = Tabs.Settings:AddLeftGroupbox("Menu")
+    local performanceGroup = Tabs.Settings:AddRightGroupbox("Performance")
+    local refreshSeedStockSection = nil
+    local refreshGearStockSection = nil
 
     local autoPlantToggle = autoPlantGroup:AddToggle("AutoPlant_Enabled", {
-        Text = "Enable Auto Plant",
+        Text = "Auto Plant",
         Default = Hub.Config.AutoPlant.Enabled
     })
     autoPlantToggle:OnChanged(function(value)
@@ -4692,12 +6288,8 @@ local function setupObsidianUI()
         DoesWrap = true
     })
 
-    antiAFKGroup:AddLabel({
-        Text = "Disables game AFK hooks and applies classic anti-idle bypass.",
-        DoesWrap = true
-    })
     local antiAFKEnabledToggle = antiAFKGroup:AddToggle("AntiAFK_Enabled", {
-        Text = "Enable Anti AFK",
+        Text = "Anti AFK",
         Default = Hub.Config.AntiAFK.Enabled
     })
     antiAFKEnabledToggle:OnChanged(function(value)
@@ -4705,7 +6297,7 @@ local function setupObsidianUI()
     end)
 
     local antiAFKDisableGameToggle = antiAFKGroup:AddToggle("AntiAFK_DisableGameConnections", {
-        Text = "Disable Game AFK Connections",
+        Text = "Block AFK Hooks",
         Default = Hub.Config.AntiAFK.DisableGameConnections
     })
     antiAFKDisableGameToggle:OnChanged(function(value)
@@ -4716,7 +6308,7 @@ local function setupObsidianUI()
     end)
 
     local antiAFKClassicToggle = antiAFKGroup:AddToggle("AntiAFK_UseClassic", {
-        Text = "Use Classic Anti AFK",
+        Text = "Classic Idle Bypass",
         Default = Hub.Config.AntiAFK.UseClassic
     })
     antiAFKClassicToggle:OnChanged(function(value)
@@ -4728,6 +6320,46 @@ local function setupObsidianUI()
 
     local antiAFKStatusLabel = antiAFKGroup:AddLabel({
         Text = "Anti AFK: Ready",
+        DoesWrap = true
+    })
+
+    local fpsBoostToggle = performanceGroup:AddToggle("FPSBoost_Enabled", {
+        Text = "Ultra FPS Boost",
+        Default = Hub.Config.FPSBoost.Enabled
+    })
+    fpsBoostToggle:OnChanged(function(value)
+        setFPSBoostEnabled(value)
+    end)
+
+    performanceGroup:AddButton({
+        Text = "FPS Cap 360",
+        Func = function()
+            Hub.Config.FPSBoost.TargetFPS = 360
+            if Hub.Config.FPSBoost.Enabled then
+                Hub.FPSBoostFeature:ApplyNow()
+            end
+        end
+    })
+
+    performanceGroup:AddButton({
+        Text = "FPS Cap 500",
+        Func = function()
+            Hub.Config.FPSBoost.TargetFPS = 500
+            if Hub.Config.FPSBoost.Enabled then
+                Hub.FPSBoostFeature:ApplyNow()
+            end
+        end
+    })
+
+    performanceGroup:AddButton({
+        Text = "Reapply Boost",
+        Func = function()
+            Hub.FPSBoostFeature:ApplyNow()
+        end
+    })
+
+    local fpsBoostStatusLabel = performanceGroup:AddLabel({
+        Text = "FPS Boost: Ready",
         DoesWrap = true
     })
 
@@ -4743,7 +6375,7 @@ local function setupObsidianUI()
     })
 
     local autoHarvestToggle = autoHarvestGroup:AddToggle("AutoHarvest_Enabled", {
-        Text = "Enable Auto Harvest",
+        Text = "Auto Harvest",
         Default = Hub.Config.AutoHarvest.Enabled
     })
     autoHarvestToggle:OnChanged(function(value)
@@ -4798,7 +6430,7 @@ local function setupObsidianUI()
 
     if #PlantTypeNames > 0 then
         autoHarvestTypeDropdown = autoHarvestGroup:AddDropdown("AutoHarvest_SelectedPlantTypes", {
-            Text = "Plant Type Filter",
+            Text = "Plant Filter",
             Values = PlantTypeNames,
             Default = selectedPlantTypeMapToList(Hub.Config.AutoHarvest.SelectedPlantTypes),
             Multi = true,
@@ -4810,7 +6442,7 @@ local function setupObsidianUI()
         end)
 
         autoHarvestGroup:AddButton({
-            Text = "Select All Types",
+            Text = "All Plants",
             Func = function()
                 local allSelected = {}
                 for _, plantType in ipairs(PlantTypeNames) do
@@ -4827,7 +6459,7 @@ local function setupObsidianUI()
         })
 
         autoHarvestGroup:AddButton({
-            Text = "Clear Type Filter",
+            Text = "Clear Plants",
             Func = function()
                 Hub.Config.AutoHarvest.SelectedPlantTypes = {}
                 if autoHarvestTypeDropdown and type(autoHarvestTypeDropdown.SetValue) == "function" then
@@ -4840,7 +6472,7 @@ local function setupObsidianUI()
         })
     else
         autoHarvestGroup:AddLabel({
-            Text = "Plant type definitions unavailable.",
+            Text = "Plant types unavailable.",
             DoesWrap = true
         })
     end
@@ -4851,7 +6483,7 @@ local function setupObsidianUI()
     })
 
     local autoBuySeedsToggle = autoBuySeedsGroup:AddToggle("AutoBuySeeds_Enabled", {
-        Text = "Enable Auto Buy Seeds",
+        Text = "Auto Buy Seeds",
         Default = Hub.Config.AutoBuySeeds.Enabled
     })
     autoBuySeedsToggle:OnChanged(function(value)
@@ -4872,7 +6504,7 @@ local function setupObsidianUI()
 
     if #SeedShopItemNames > 0 then
         autoBuySeedsDropdown = autoBuySeedsGroup:AddDropdown("AutoBuySeeds_SelectedSeedNames", {
-            Text = "Seed Selection",
+            Text = "Seed List",
             Values = SeedShopItemNames,
             Default = selectedSeedNameMapToList(Hub.Config.AutoBuySeeds.SelectedSeedNames),
             Multi = true,
@@ -4884,7 +6516,7 @@ local function setupObsidianUI()
         end)
 
         autoBuySeedsGroup:AddButton({
-            Text = "Select All Seeds",
+            Text = "All Seeds",
             Func = function()
                 local allSelected = {}
                 for _, itemName in ipairs(SeedShopItemNames) do
@@ -4914,7 +6546,7 @@ local function setupObsidianUI()
         })
     else
         autoBuySeedsGroup:AddLabel({
-            Text = "Seed definitions unavailable.",
+            Text = "Seed list unavailable.",
             DoesWrap = true
         })
     end
@@ -4925,7 +6557,7 @@ local function setupObsidianUI()
     })
 
     local autoBuyGearsToggle = autoBuyGearsGroup:AddToggle("AutoBuyGears_Enabled", {
-        Text = "Enable Auto Buy Gears",
+        Text = "Auto Buy Gears",
         Default = Hub.Config.AutoBuyGears.Enabled
     })
     autoBuyGearsToggle:OnChanged(function(value)
@@ -4946,7 +6578,7 @@ local function setupObsidianUI()
 
     if #GearShopItemNames > 0 then
         autoBuyGearsDropdown = autoBuyGearsGroup:AddDropdown("AutoBuyGears_SelectedGearNames", {
-            Text = "Gear Selection",
+            Text = "Gear List",
             Values = GearShopItemNames,
             Default = selectedGearNameMapToList(Hub.Config.AutoBuyGears.SelectedGearNames),
             Multi = true,
@@ -4958,7 +6590,7 @@ local function setupObsidianUI()
         end)
 
         autoBuyGearsGroup:AddButton({
-            Text = "Select All Gears",
+            Text = "All Gears",
             Func = function()
                 local allSelected = {}
                 for _, itemName in ipairs(GearShopItemNames) do
@@ -4988,7 +6620,7 @@ local function setupObsidianUI()
         })
     else
         autoBuyGearsGroup:AddLabel({
-            Text = "Gear definitions unavailable.",
+            Text = "Gear list unavailable.",
             DoesWrap = true
         })
     end
@@ -4998,52 +6630,121 @@ local function setupObsidianUI()
         DoesWrap = true
     })
 
-    local seedStockStatusLabel = seedStockGroup:AddLabel({
-        Text = "Seed Stock: Loading...",
+    botanistGroup:AddToggle("AutoBotanist_Enabled", {
+        Text = "Auto Botanist",
+        Default = Hub.Config.AutoBotanist.Enabled
+    }):OnChanged(function(value)
+        setAutoBotanistEnabled(value)
+    end)
+
+    botanistGroup:AddToggle("AutoBotanist_AutoRequestQuest", {
+        Text = "Auto Get Quest",
+        Default = Hub.Config.AutoBotanist.AutoRequestQuest
+    }):OnChanged(function(value)
+        Hub.Config.AutoBotanist.AutoRequestQuest = value == true
+    end)
+
+    botanistGroup:AddToggle("AutoBotanist_AutoDonateAll", {
+        Text = "Auto Quest Loop",
+        Default = Hub.Config.AutoBotanist.AutoDonateAll
+    }):OnChanged(function(value)
+        Hub.Config.AutoBotanist.AutoDonateAll = value == true
+    end)
+
+    botanistGroup:AddToggle("AutoBotanist_AutoAppraiseHeld", {
+        Text = "Auto Appraise Held",
+        Default = Hub.Config.AutoBotanist.AutoAppraiseHeld
+    }):OnChanged(function(value)
+        Hub.Config.AutoBotanist.AutoAppraiseHeld = value == true
+    end)
+
+    botanistGroup:AddToggle("AutoBotanist_TeleportToBotanist", {
+        Text = "TP If No Quest",
+        Default = Hub.Config.AutoBotanist.TeleportToBotanist
+    }):OnChanged(function(value)
+        Hub.Config.AutoBotanist.TeleportToBotanist = value == true
+    end)
+
+    botanistGroup:AddButton({
+        Text = "Get Quest Now",
+        Func = function()
+            local response, err = Hub.AutoBotanistFeature:_invokeQuest("GetQuest")
+            if not response then
+                Hub.AutoBotanistFeature:_setStatus("Auto Botanist: GetQuest failed (" .. tostring(err) .. ")")
+                return
+            end
+            Hub.AutoBotanistFeature:_refreshQuestState(response)
+            Hub.AutoBotanistFeature:_setStatus(
+                string.format(
+                    "Auto Botanist: Quest status - %s (%s %.2f/%.2fkg)",
+                    tostring(response.Status or "unknown"),
+                    tostring(Hub.AutoBotanistFeature._questMutation or "?"),
+                    tonumber(Hub.AutoBotanistFeature._questTotalWeight) or 0,
+                    tonumber(Hub.AutoBotanistFeature._questTargetWeight) or 0
+                )
+            )
+        end
+    })
+
+    botanistGroup:AddButton({
+        Text = "Donate Quest Once",
+        Func = function()
+            local donated, status, response = Hub.AutoBotanistFeature:_donateSingleMatchingTool()
+            if not donated then
+                Hub.AutoBotanistFeature:_setStatus("Auto Botanist: Donate skipped (" .. tostring(status or "no matching tool") .. ")")
+                return
+            end
+            Hub.AutoBotanistFeature:_setStatus(
+                string.format(
+                    "Auto Botanist: Donate status - %s (%s %.2f/%.2fkg)",
+                    tostring(status or (response and response.Status) or "unknown"),
+                    tostring(Hub.AutoBotanistFeature._questMutation or "?"),
+                    tonumber(Hub.AutoBotanistFeature._questTotalWeight) or 0,
+                    tonumber(Hub.AutoBotanistFeature._questTargetWeight) or 0
+                )
+            )
+        end
+    })
+
+    botanistGroup:AddButton({
+        Text = "Appraise Held Once",
+        Func = function()
+            if not Hub.AutoBotanistFeature:_getHeldHarvestedTool() then
+                Hub.AutoBotanistFeature:_setStatus("Auto Botanist: Equip harvested crop first")
+                return
+            end
+            local response, err = Hub.AutoBotanistFeature:_invokeAppraise()
+            if not response then
+                Hub.AutoBotanistFeature:_setStatus("Auto Botanist: Appraise failed (" .. tostring(err) .. ")")
+                return
+            end
+            Hub.AutoBotanistFeature:_setStatus("Auto Botanist: Appraise status - " .. tostring(response.Status or "unknown"))
+        end
+    })
+
+    botanistGroup:AddLabel({
+        Text = "<font color='#94A3B8'>Appraise cost: ~32.5% of held crop value</font>",
         DoesWrap = true
     })
-    local gearStockStatusLabel = gearStockGroup:AddLabel({
-        Text = "Gear Stock: Loading...",
+
+    local autoBotanistStatusLabel = botanistGroup:AddLabel({
+        Text = "Auto Botanist: Ready",
         DoesWrap = true
     })
 
-    local function refreshSeedStockSection()
-        task.spawn(function()
-            local stockSnapshot, fetchError = fetchSeedShopDataSnapshot()
-            updateSeedStockStatus(stockSnapshot, fetchError)
-        end)
-    end
-
-    local function refreshGearStockSection()
-        task.spawn(function()
-            local stockSnapshot, fetchError = fetchGearShopDataSnapshot()
-            updateGearStockStatus(stockSnapshot, fetchError)
-        end)
-    end
-
-    seedStockGroup:AddButton({
-        Text = "Refresh Seed Stock",
-        Func = refreshSeedStockSection
-    })
-    gearStockGroup:AddButton({
-        Text = "Refresh Gear Stock",
-        Func = refreshGearStockSection
-    })
+    refreshSeedStockSection = refreshSeedStockStatus
+    refreshGearStockSection = refreshGearStockStatus
 
     refreshSeedStockSection()
     refreshGearStockSection()
 
     smartSprinklerGroup:AddLabel({
-        Text = '<font color="#F59E0B"><b>Warning:</b> Smart Sprinkler is still in development and may fail or place sub-optimally.</font>',
-        DoesWrap = true
-    })
-    smartSprinklerGroup:AddLabel({
-        Text = '<font color="#9CA3AF">Use with caution while placement logic is being improved.</font>',
+        Text = '<font color="#F59E0B">WIP: may miss some spots.</font>',
         DoesWrap = true
     })
 
     local autoSprinklerToggle = smartSprinklerGroup:AddToggle("AutoSprinkler_Enabled", {
-        Text = "Enable Smart Sprinkler",
+        Text = "Auto Sprinkler",
         Default = Hub.Config.AutoSprinkler.Enabled
     })
     autoSprinklerToggle:OnChanged(function(value)
@@ -5051,7 +6752,7 @@ local function setupObsidianUI()
     end)
 
     smartSprinklerGroup:AddButton({
-        Text = "Place Smart Layout Now",
+        Text = "Place Now",
         Func = function()
             sprinklerLog("Manual button clicked")
             task.spawn(function()
@@ -5067,7 +6768,7 @@ local function setupObsidianUI()
     })
 
     smartSprinklerGroup:AddLabel({
-        Text = "Basic: Range 8 / 5 min | Turbo: Range 12 / 10 min | Super: Range 16 / 15 min",
+        Text = "Basic 8 | Turbo 12 | Super 16",
         DoesWrap = true
     })
 
@@ -5077,7 +6778,7 @@ local function setupObsidianUI()
     })
 
     local autoSellToggle = autoSellGroup:AddToggle("AutoSell_Enabled", {
-        Text = "Enable Auto Sell",
+        Text = "Auto Sell",
         Default = Hub.Config.AutoSell.Enabled
     })
     autoSellToggle:OnChanged(function(value)
@@ -5089,17 +6790,47 @@ local function setupObsidianUI()
         DoesWrap = true
     })
 
+    autoSellGroup:AddDivider({
+        Text = "Seed Stock",
+        Margin = 1
+    })
+    local seedStockStatusLabel = autoSellGroup:AddLabel({
+        Text = "Seed Stock: Loading...\n<font color='#94A3B8'>Update Timer: --:--</font>",
+        DoesWrap = true
+    })
+    autoSellGroup:AddButton({
+        Text = "Refresh Seeds",
+        Func = refreshSeedStockSection
+    })
+
+    autoSellGroup:AddDivider({
+        Text = "Gear Stock",
+        Margin = 1
+    })
+    local gearStockStatusLabel = autoSellGroup:AddLabel({
+        Text = "Gear Stock: Loading...\n<font color='#94A3B8'>Update Timer: --:--</font>",
+        DoesWrap = true
+    })
+    autoSellGroup:AddButton({
+        Text = "Refresh Gears",
+        Func = refreshGearStockSection
+    })
+
     local teleportStatusLabel = teleportGroup:AddLabel({
-        Text = "Teleport: Ready",
+        Text = "<font color='#93C5FD'>Teleport: Ready</font>",
         DoesWrap = true
     })
 
     local function updateTeleportStatus(prefix, success, reason)
         local text
         if success then
-            text = prefix .. ": Teleported"
+            text = string.format("<font color='#22C55E'>%s: Teleported</font>", escapeRichText(prefix))
         else
-            text = prefix .. ": Failed (" .. tostring(reason or "unknown") .. ")"
+            text = string.format(
+                "<font color='#EF4444'>%s: Failed (%s)</font>",
+                escapeRichText(prefix),
+                escapeRichText(tostring(reason or "unknown"))
+            )
         end
         pcall(function()
             teleportStatusLabel:SetText(text)
@@ -5107,7 +6838,7 @@ local function setupObsidianUI()
     end
 
     teleportGroup:AddButton({
-        Text = "TP Garden",
+        Text = "Garden",
         Func = function()
             local ok, reason = teleportToGarden(true)
             updateTeleportStatus("Garden", ok, reason)
@@ -5115,7 +6846,7 @@ local function setupObsidianUI()
     })
 
     teleportGroup:AddButton({
-        Text = "TP Seed",
+        Text = "Seed Shop",
         Func = function()
             local ok, reason = teleportToSeeds(true)
             updateTeleportStatus("Seed", ok, reason)
@@ -5123,7 +6854,7 @@ local function setupObsidianUI()
     })
 
     teleportGroup:AddButton({
-        Text = "TP Sell",
+        Text = "Sell Zone",
         Func = function()
             local ok, reason = teleportToSell(true)
             updateTeleportStatus("Sell", ok, reason)
@@ -5131,40 +6862,56 @@ local function setupObsidianUI()
     })
 
     teleportGroup:AddButton({
-        Text = "TP Shop",
+        Text = "Gear Shop",
         Func = function()
             local ok, reason = teleportToShop(true)
             updateTeleportStatus("Shop", ok, reason)
         end
     })
 
-    uiGroup:AddLabel("Menu Toggle: RightShift")
+    teleportGroup:AddButton({
+        Text = "Botanist",
+        Func = function()
+            local ok, reason = Hub.AutoBotanistFeature:_teleportToBotanist(true)
+            updateTeleportStatus("Botanist", ok, reason)
+        end
+    })
+
+    uiGroup:AddLabel({
+        Text = "Toggle key: RightShift",
+        DoesWrap = true
+    })
     uiGroup:AddButton({
-        Text = "Unload UI",
+        Text = "Refresh Status",
+        Func = function()
+            AutoPlantFeature:_setStatus(AutoPlantFeature._statusText or "Auto Plant: Ready")
+            AutoBuySeedsFeature:_setStatus(AutoBuySeedsFeature._statusText or "Auto Buy Seeds: Ready")
+            AutoBuyGearsFeature:_setStatus(AutoBuyGearsFeature._statusText or "Auto Buy Gears: Ready")
+            Hub.AutoBotanistFeature:_setStatus(Hub.AutoBotanistFeature._statusText or "Auto Botanist: Ready")
+            AutoSprinklerFeature:_setStatus(AutoSprinklerFeature._statusText or "Smart Sprinkler: Ready")
+            AutoSellFeature:_setStatus(AutoSellFeature._statusText or "Auto Sell: Ready")
+            AutoHarvestFeature:_setStatus(AutoHarvestFeature._statusText or "Auto Harvest: Ready")
+            AntiAFKFeature:_setStatus(AntiAFKFeature._statusText or "Anti AFK: Ready")
+            Hub.FPSBoostFeature:_setStatus(Hub.FPSBoostFeature._statusText or "FPS Boost: Ready")
+            PlantRankingFeature:_setStatus(PlantRankingFeature._statusText or "Scanning plot plants...")
+            renderStockStatus("SeedStock", "Seed Stock", SeedShopItemDefinitions, StockStatusState.Seed)
+            renderStockStatus("GearStock", "Gear Stock", GearShopItemDefinitions, StockStatusState.Gear)
+            flushQueuedUILabelUpdates()
+        end
+    })
+    uiGroup:AddButton({
+        Text = "Close Hub",
         Func = function()
             unloadHub()
         end
     })
 
-    discordGroup:AddDivider({
-        Text = "Discord Section",
-        Margin = 2
-    })
     discordGroup:AddLabel({
         Text = '<font color="#5865F2"><b>Trustsense Community</b></font>',
         DoesWrap = true
     })
     discordGroup:AddLabel({
-        Text = '<font color="#99AAB5">Join for updates, support, and script news.</font>',
-        DoesWrap = true
-    })
-    discordGroup:AddDivider({
-        Text = "Invite Box",
-        Margin = 2
-    })
-
-    discordGroup:AddLabel({
-        Text = '<font color="#5865F2"><b>discord.gg/6KVvbEYaXF</b></font>\n<font color="#B9BBBE">https://discord.gg/6KVvbEYaXF</font>',
+        Text = '<font color="#5865F2"><b>discord.gg/6KVvbEYaXF</b></font>',
         DoesWrap = true
     })
 
@@ -5204,6 +6951,19 @@ local function setupObsidianUI()
         end
     })
 
+    discordGroup:AddDivider({
+        Text = "Changelog",
+        Margin = 1
+    })
+    discordGroup:AddLabel({
+        Text = "<font color='#22C55E'>[NEW]</font> Ultra FPS Boost now stacks classic low-graphics tweaks with environment culling for smoother gameplay.",
+        DoesWrap = true
+    })
+    discordGroup:AddLabel({
+        Text = "<font color='#22C55E'>[NEW]</font> Auto Botanist now runs quest-smart flow: fetch quest, harvest matching mutations, then donate quest-only crops.",
+        DoesWrap = true
+    })
+
     Hub.UI = {
         Library = Library,
         ThemeManager = ThemeManager,
@@ -5214,17 +6974,22 @@ local function setupObsidianUI()
         PlantRankingsLabel = plantRankingsLabel,
         AutoBuySeedsStatusLabel = autoBuySeedsStatusLabel,
         AutoBuyGearsStatusLabel = autoBuyGearsStatusLabel,
+        AutoBotanistStatusLabel = autoBotanistStatusLabel,
         AutoSprinklerStatusLabel = autoSprinklerStatusLabel,
         SeedStockStatusLabel = seedStockStatusLabel,
         GearStockStatusLabel = gearStockStatusLabel,
         AutoSellStatusLabel = autoSellStatusLabel,
         AutoHarvestStatusLabel = autoHarvestStatusLabel,
-        AntiAFKStatusLabel = antiAFKStatusLabel
+        AntiAFKStatusLabel = antiAFKStatusLabel,
+        FPSBoostStatusLabel = fpsBoostStatusLabel
     }
 
     if ThemeManager and SaveManager then
         pcall(function()
             ThemeManager:SetLibrary(Library)
+            if type(ThemeManager.SetDefaultTheme) == "function" then
+                ThemeManager:SetDefaultTheme(TrustsenseAuroraTheme)
+            end
             SaveManager:SetLibrary(Library)
             SaveManager:IgnoreThemeSettings()
 
@@ -5236,18 +7001,29 @@ local function setupObsidianUI()
 
             SaveManager:BuildConfigSection(Tabs.Settings)
             ThemeManager:ApplyToTab(Tabs.Settings)
+            if type(ThemeManager.LoadDefault) == "function" then
+                ThemeManager:LoadDefault()
+            elseif type(ThemeManager.ApplyTheme) == "function" then
+                ThemeManager:ApplyTheme("Default")
+            end
             SaveManager:LoadAutoloadConfig()
+            if type(ThemeManager.ApplyTheme) == "function" then
+                ThemeManager:ApplyTheme("Default")
+            end
         end)
     end
 
     ensureUILabelUpdateBridge()
+    ensureStockTimerLoop()
     AutoPlantFeature:_setStatus(AutoPlantFeature._statusText or "Auto Plant: Ready")
     AutoBuySeedsFeature:_setStatus(AutoBuySeedsFeature._statusText or "Auto Buy Seeds: Ready")
     AutoBuyGearsFeature:_setStatus(AutoBuyGearsFeature._statusText or "Auto Buy Gears: Ready")
+    Hub.AutoBotanistFeature:_setStatus(Hub.AutoBotanistFeature._statusText or "Auto Botanist: Ready")
     AutoSprinklerFeature:_setStatus(AutoSprinklerFeature._statusText or "Smart Sprinkler: Ready")
     AutoSellFeature:_setStatus(AutoSellFeature._statusText or "Auto Sell: Ready")
     AutoHarvestFeature:_setStatus(AutoHarvestFeature._statusText or "Auto Harvest: Ready")
     AntiAFKFeature:_setStatus(AntiAFKFeature._statusText or "Anti AFK: Ready")
+    Hub.FPSBoostFeature:_setStatus(Hub.FPSBoostFeature._statusText or "FPS Boost: Ready")
     PlantRankingFeature:_setStatus(PlantRankingFeature._statusText or "Scanning plot plants...")
     flushQueuedUILabelUpdates()
 end
@@ -5262,11 +7038,12 @@ task.spawn(function()
     setAutoPlantEnabled(Hub.Config.AutoPlant.Enabled)
     setAutoBuySeedsEnabled(Hub.Config.AutoBuySeeds.Enabled)
     setAutoBuyGearsEnabled(Hub.Config.AutoBuyGears.Enabled)
+    setAutoBotanistEnabled(Hub.Config.AutoBotanist.Enabled)
     setAutoSprinklerEnabled(Hub.Config.AutoSprinkler.Enabled)
     setAutoSellEnabled(Hub.Config.AutoSell.Enabled)
     setAutoHarvestEnabled(Hub.Config.AutoHarvest.Enabled)
     setAntiAFKEnabled(Hub.Config.AntiAFK.Enabled)
-    PlantRankingFeature:Start()
+    setFPSBoostEnabled(Hub.Config.FPSBoost.Enabled)
 end)
 
 return Hub
