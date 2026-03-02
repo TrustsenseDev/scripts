@@ -11,6 +11,20 @@ Hub.Features = Hub.Features or {}
 
 local FPS_BOOST_TICK_INTERVAL = 0.4
 local FPS_BOOST_SETTINGS_INTERVAL = 2.0
+local AUTOLOAD_SETTLE_TIMEOUT = 8.0
+local AUTOLOAD_SETTLE_POLL_INTERVAL = 0.05
+local AUTOLOAD_POST_LOAD_WAIT = 0.25
+local MERCHANT_WARMUP_OPEN_WAIT = 0.5
+local MERCHANT_WARMUP_RETRY_DELAY = 0.15
+local MERCHANT_WARMUP_COOLDOWN = 8.0
+
+local RuntimeState = {
+    AutoloadReady = false,
+    ProfileGateComplete = false,
+    PlayerGateComplete = false,
+    FeaturesApplied = false,
+    MerchantWarmupNextAt = 0
+}
 
 Hub.Config.AutoBuyAllDice = Hub.Config.AutoBuyAllDice or {
     Enabled = true,
@@ -198,6 +212,7 @@ local PotionData = require(Modules:WaitForChild("PotionData"))
 local RarityData = require(Modules:WaitForChild("Rarities"))
 local QuestData = require(Modules:WaitForChild("QuestHandler"))
 local MutationData = require(Modules:WaitForChild("Mutations"))
+local TabManagerModule = require(Modules:WaitForChild("TabManager"))
 
 local DISCORD_INVITE_URL = "https://discord.gg/6KVvbEYaXF"
 local DISCORD_INVITE_CODE = "6KVvbEYaXF"
@@ -1123,16 +1138,82 @@ local function buyFromPotionRestockShop(profileData, coinsBudget)
     return coinsBudget
 end
 
+local function isMerchantEventActive()
+    return StatusState:GetAttribute("nullity_active") == true
+end
+
+local function getTabManager()
+    if not TabManagerModule or type(TabManagerModule.get) ~= "function" then
+        return nil
+    end
+
+    local ok, manager = pcall(TabManagerModule.get)
+    if not ok or type(manager) ~= "table" then
+        return nil
+    end
+    if type(manager.open) ~= "function" or type(manager.close) ~= "function" then
+        return nil
+    end
+
+    return manager
+end
+
+local function warmupMerchantShopUi()
+    local now = os.clock()
+    if now < RuntimeState.MerchantWarmupNextAt then
+        return false
+    end
+
+    RuntimeState.MerchantWarmupNextAt = now + MERCHANT_WARMUP_COOLDOWN
+
+    local tabManager = getTabManager()
+    if not tabManager then
+        return false
+    end
+
+    local previousTab = tabManager.current
+    pcall(function()
+        tabManager:open("MerchantShop")
+    end)
+    task.wait(MERCHANT_WARMUP_OPEN_WAIT)
+
+    if previousTab and previousTab ~= "MerchantShop" then
+        pcall(function()
+            tabManager:open(previousTab)
+        end)
+    else
+        pcall(function()
+            tabManager:close("MerchantShop")
+        end)
+    end
+
+    return true
+end
+
 local function buyFromMerchantShop(profileData, coinsBudget)
-    local requestData = safeInvoke(MerchantRequestRemote)
-    if type(requestData) ~= "table" or type(requestData.wares) ~= "table" then
+    if not isMerchantEventActive() then
         return coinsBudget
+    end
+
+    local requestData = safeInvoke(MerchantRequestRemote)
+    local wares = type(requestData) == "table" and requestData.wares or nil
+
+    if type(wares) ~= "table" or #wares == 0 then
+        if warmupMerchantShopUi() then
+            task.wait(MERCHANT_WARMUP_RETRY_DELAY)
+            requestData = safeInvoke(MerchantRequestRemote)
+            wares = type(requestData) == "table" and requestData.wares or nil
+        end
+
+        if type(wares) ~= "table" then
+            return coinsBudget
+        end
     end
 
     local maxPurchases = Hub.Config.AutoBuyAllDice.MaxMerchantPurchasesPerTick
     local purchasesThisTick = 0
 
-    for offerIndex, offerData in ipairs(requestData.wares) do
+    for offerIndex, offerData in ipairs(wares) do
         if purchasesThisTick >= maxPurchases then
             break
         end
@@ -2316,6 +2397,44 @@ local function setFPSBoostEnabled(enabled)
     end
 end
 
+local function applyFeatureStatesFromConfig()
+    if RuntimeState.FeaturesApplied then
+        return
+    end
+    if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+        return
+    end
+
+    RuntimeState.FeaturesApplied = true
+    setAutoBuyEnabled(Hub.Config.AutoBuyAllDice.Enabled)
+    setAutoBuyEggsEnabled(Hub.Config.AutoBuyEggs.Enabled)
+    setAutoOpenBestDiceEnabled(Hub.Config.AutoOpenBestDice.Enabled)
+    setAutoUsePotionsEnabled(Hub.Config.AutoUsePotions.Enabled)
+    setAutoCollectQuestsEnabled(Hub.Config.AutoCollectQuests.Enabled)
+    setAutoClaimAllIndexEnabled(Hub.Config.AutoClaimAllIndex.Enabled)
+    setAutoCollectCoinsEnabled(Hub.Config.AutoCollectCoins.Enabled)
+    setAutoSpinWheelEnabled(Hub.Config.AutoSpinWheel.Enabled)
+    setAntiAFKEnabled(Hub.Config.AntiAFK.Enabled)
+    setFPSBoostEnabled(Hub.Config.FPSBoost.Enabled)
+end
+
+local function tryApplyFeatureStates()
+    if RuntimeState.FeaturesApplied then
+        return
+    end
+    if not RuntimeState.AutoloadReady then
+        return
+    end
+    if not RuntimeState.ProfileGateComplete then
+        return
+    end
+    if not RuntimeState.PlayerGateComplete then
+        return
+    end
+
+    applyFeatureStatesFromConfig()
+end
+
 local function loadRemoteModule(url, label)
     local ok, moduleOrError = pcall(function()
         return loadstring(game:HttpGet(url))()
@@ -2330,6 +2449,8 @@ local function loadRemoteModule(url, label)
 end
 
 local function setupObsidianUI()
+    RuntimeState.AutoloadReady = false
+
     local existingUI = Hub.UI
     if existingUI and existingUI.Library and type(existingUI.Library.Unload) == "function" then
         pcall(function()
@@ -2340,6 +2461,8 @@ local function setupObsidianUI()
     local repoBase = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
     local Library = loadRemoteModule(repoBase .. "Library.lua", "Obsidian Library")
     if not Library then
+        RuntimeState.AutoloadReady = true
+        tryApplyFeatureStates()
         return
     end
 
@@ -2951,6 +3074,7 @@ local function setupObsidianUI()
         ThemeManager:ApplyToTab(Tabs.Settings)
         SaveManager:BuildConfigSection(Tabs.Settings)
         SaveManager:LoadAutoloadConfig()
+        task.wait(AUTOLOAD_POST_LOAD_WAIT)
     end
 
     Hub.UI = {
@@ -2958,26 +3082,34 @@ local function setupObsidianUI()
         Window = Window,
         Tabs = Tabs
     }
+
+    RuntimeState.AutoloadReady = true
+    tryApplyFeatureStates()
 end
 
 task.spawn(function()
     waitForProfile(Hub.Config.AutoBuyAllDice.ProfileWaitTimeout)
+    RuntimeState.ProfileGateComplete = true
     waitForPlayerLoaded(Hub.Config.AutoBuyAllDice.PlayerLoadedWaitTimeout)
+    RuntimeState.PlayerGateComplete = true
 
     if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
         return
     end
 
-    setAutoBuyEnabled(Hub.Config.AutoBuyAllDice.Enabled)
-    setAutoBuyEggsEnabled(Hub.Config.AutoBuyEggs.Enabled)
-    setAutoOpenBestDiceEnabled(Hub.Config.AutoOpenBestDice.Enabled)
-    setAutoUsePotionsEnabled(Hub.Config.AutoUsePotions.Enabled)
-    setAutoCollectQuestsEnabled(Hub.Config.AutoCollectQuests.Enabled)
-    setAutoClaimAllIndexEnabled(Hub.Config.AutoClaimAllIndex.Enabled)
-    setAutoCollectCoinsEnabled(Hub.Config.AutoCollectCoins.Enabled)
-    setAutoSpinWheelEnabled(Hub.Config.AutoSpinWheel.Enabled)
-    setAntiAFKEnabled(Hub.Config.AntiAFK.Enabled)
-    setFPSBoostEnabled(Hub.Config.FPSBoost.Enabled)
+    local deadline = os.clock() + AUTOLOAD_SETTLE_TIMEOUT
+    while not RuntimeState.AutoloadReady and os.clock() < deadline do
+        task.wait(AUTOLOAD_SETTLE_POLL_INTERVAL)
+        if Hub.IsUnloaded or Hub.RunId ~= CurrentRunId then
+            return
+        end
+    end
+
+    if not RuntimeState.AutoloadReady then
+        RuntimeState.AutoloadReady = true
+    end
+
+    tryApplyFeatureStates()
 end)
 
 task.spawn(setupObsidianUI)
