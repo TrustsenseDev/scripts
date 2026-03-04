@@ -214,8 +214,8 @@ local QuestData = require(Modules:WaitForChild("QuestHandler"))
 local MutationData = require(Modules:WaitForChild("Mutations"))
 local TabManagerModule = require(Modules:WaitForChild("TabManager"))
 
-local DISCORD_INVITE_URL = "https://discord.gg/6KVvbEYaXF"
-local DISCORD_INVITE_CODE = "6KVvbEYaXF"
+local DISCORD_INVITE_URL = "https://discord.gg/JnGYZXyFjM"
+local DISCORD_INVITE_CODE = "JnGYZXyFjM"
 
 local function debugLog(...)
     return ...
