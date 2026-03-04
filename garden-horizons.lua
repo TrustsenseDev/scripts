@@ -123,8 +123,8 @@ local SprinklerDefinitions = require(ReplicatedStorage:WaitForChild("Gears"):Wai
 local PlantDataDefinitions = require(ReplicatedStorage:WaitForChild("Plants"):WaitForChild("Definitions"):WaitForChild("PlantDataDefinitions"))
 local BotanistDefinitions = require(ReplicatedStorage:WaitForChild("Plants"):WaitForChild("Definitions"):WaitForChild("BotanistDefinitions"))
 
-local DISCORD_INVITE_URL = "https://discord.gg/6KVvbEYaXF"
-local DISCORD_INVITE_CODE = "6KVvbEYaXF"
+local DISCORD_INVITE_URL = "https://discord.gg/JnGYZXyFjM"
+local DISCORD_INVITE_CODE = "JnGYZXyFjM"
 
 local EQUIP_DELAY = 0.08
 local PLANT_DELAY = 0.12
